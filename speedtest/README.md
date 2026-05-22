@@ -36,4 +36,7 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 
 <details>
 <summary>更新日志</summary>
+
+### v0.0.2 (2026-05-22)
+- 🌈主控测速插件
 </details>
