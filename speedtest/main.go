@@ -24,6 +24,7 @@ type wsMsg struct {
 	URL         string  `json:"url,omitempty"`
 	DownMbps    float64 `json:"down_mbps,omitempty"`
 	LatencyMs   int64   `json:"latency_ms,omitempty"`
+	EgressIP    string  `json:"egress_ip,omitempty"`
 	Status      string  `json:"status,omitempty"`
 	Error       string  `json:"error,omitempty"`
 	Name        string  `json:"name,omitempty"`
@@ -125,7 +126,7 @@ func runJob(job wsMsg, send func(wsMsg) error) {
 		TestBytes: job.Bytes,
 		TestURL:   job.URL,
 	})
-	out := wsMsg{Type: "result", JobID: job.JobID, LatencyMs: res.LatencyMs}
+	out := wsMsg{Type: "result", JobID: job.JobID, LatencyMs: res.LatencyMs, EgressIP: res.EgressIP}
 	if terr != nil {
 		out.Status = "failed"
 		out.Error = terr.Error()
