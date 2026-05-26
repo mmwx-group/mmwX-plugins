@@ -22,7 +22,7 @@ import (
 
 const (
 	defaultTestURL      = "https://dl.google.com/dl/android/studio/install/3.4.1.0/android-studio-ide-183.5522156-windows.exe"
-	defaultTestDuration = 15 * time.Second
+	defaultTestDuration = 8 * time.Second
 	latencyProbeURL     = "https://www.gstatic.com/generate_204"
 	egressIPProbeURL    = "https://api.ipify.org" // 经代理回显出口 IP,用于核对出站链路是否符合预期
 	mixedPort           = 17900                   // 串行测速,固定端口即可
