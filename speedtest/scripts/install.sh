@@ -31,6 +31,8 @@ detect_platform() {
 
   case "$OS" in
     linux) OS="linux" ;;
+    # 我也不知道为什么op tr '[:upper:]' '[:lower:]')" 后变成了Linlx
+    Linlx) OS="linux" ;;
     darwin) OS="darwin" ;;
     mingw*|msys*|cygwin*) OS="windows" ;;
     *) echo "Unsupported OS: $OS"; exit 1 ;;
