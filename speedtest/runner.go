@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -200,9 +201,37 @@ func startMihomo(bin, workdir string, cfg []byte) (func(), error) {
 	return nil, fmt.Errorf("mihomo 启动超时(端口 %d 15s 内未就绪)", mixedPort)
 }
 
+// proxyClient 经 mihomo mixed-port 走代理的 HTTP 客户端。
+// 单流测速调优:1MB ReadBufferSize / 禁 HTTP/2(单流被流控限速)/ 禁 Compression / 复用 Transport
 func proxyClient() *http.Client {
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
-	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	return &http.Client{Transport: sharedProxyTransport()}
+}
+
+var (
+	sharedTransportOnce sync.Once
+	sharedTransport     *http.Transport
+)
+
+func sharedProxyTransport() *http.Transport {
+	sharedTransportOnce.Do(func() {
+		proxyURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
+		sharedTransport = &http.Transport{
+			Proxy:              http.ProxyURL(proxyURL),
+			ReadBufferSize:     1 << 20, // 1MB,降低 loopback->mihomo read syscall 频率
+			WriteBufferSize:    64 << 10,
+			DisableCompression: true,
+			ForceAttemptHTTP2:  false,
+			TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{}, // 显式禁 HTTP/2
+			MaxIdleConns:       64,
+			IdleConnTimeout:    90 * time.Second,
+		}
+	})
+	return sharedTransport
+}
+
+// 1MB 测速 io.Copy 缓冲池(默认 32KB 在 >100Mbps 时 syscall 太密)
+var bigCopyBufPool = sync.Pool{
+	New: func() any { b := make([]byte, 1<<20); return &b },
 }
 
 // measureLatency 经代理 GET 一个 204 端点,返回毫秒;失败返回 -1。
@@ -317,6 +346,7 @@ func downloadSingle(ctx context.Context, dlURL string, maxBytes int64) (int64, t
 		return 0, 0, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 mmwx-speedtest/1.0")
+	req.Header.Set("Accept-Encoding", "identity")
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
@@ -330,7 +360,9 @@ func downloadSingle(ctx context.Context, dlURL string, maxBytes int64) (int64, t
 	if maxBytes > 0 {
 		reader = io.LimitReader(resp.Body, maxBytes)
 	}
-	n, cerr := io.Copy(io.Discard, reader)
+	buf := bigCopyBufPool.Get().(*[]byte)
+	defer bigCopyBufPool.Put(buf)
+	n, cerr := io.CopyBuffer(io.Discard, reader, *buf)
 	elapsed := time.Since(start)
 	if ctx.Err() == context.DeadlineExceeded || cerr == nil {
 		return n, elapsed, nil
