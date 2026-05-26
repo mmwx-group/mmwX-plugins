@@ -46,6 +46,7 @@ type Options struct {
 	TestDuration time.Duration // 测速时长(默认 10s):下载这么久,按真实字节/耗时算速率
 	TestBytes    int64         // 可选下载上限(0=不限,纯按时长)
 	Timeout      time.Duration
+	Threads      int // 并发下载线程数(<=1 单线程)
 }
 
 // RunNodeTest 用 mihomo 起单节点代理,测延迟 + 下行吞吐。clashConfigJSON 是 node.ClashConfig。
@@ -103,7 +104,11 @@ func RunNodeTest(ctx context.Context, mihomoBin, clashConfigJSON string, opts Op
 	latency := measureLatency(ctx)
 	egressIP := measureEgressIP(ctx)
 
-	n, dur, err := downloadTimed(ctx, testURL, opts.TestDuration, opts.TestBytes)
+	threads := opts.Threads
+	if threads <= 1 {
+		threads = 1
+	}
+	n, dur, err := downloadTimed(ctx, testURL, opts.TestDuration, opts.TestBytes, threads)
 	if err != nil {
 		return Result{LatencyMs: latency, EgressIP: egressIP}, fmt.Errorf("下载测速失败: %w", err)
 	}
@@ -208,13 +213,47 @@ func measureLatency(ctx context.Context) int64 {
 	return time.Since(start).Milliseconds()
 }
 
-// downloadTimed 经代理下载,最多下载 dur 时长(到时即停),可选 maxBytes 上限(0=不限)。
-// 返回实际下载字节数与实际耗时。到时停止是正常结束(不算错误);时长内连接出错才算失败。
-func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxBytes int64) (int64, time.Duration, error) {
+func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxBytes int64, threads int) (int64, time.Duration, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, dur)
 	defer cancel()
+
+	if threads <= 1 {
+		return downloadSingle(dlCtx, dlURL, maxBytes)
+	}
+
+	var wg sync.WaitGroup
+	results := make([]int64, threads)
+	errs := make([]error, threads)
+	start := time.Now()
+	for i := range threads {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			n, _, e := downloadSingle(dlCtx, dlURL, maxBytes)
+			results[idx] = n
+			errs[idx] = e
+		}(i)
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	var total int64
+	var firstErr error
+	for i := range threads {
+		total += results[i]
+		if errs[i] != nil && firstErr == nil {
+			firstErr = errs[i]
+		}
+	}
+	if total > 0 {
+		return total, elapsed, nil
+	}
+	return 0, elapsed, firstErr
+}
+
+func downloadSingle(ctx context.Context, dlURL string, maxBytes int64) (int64, time.Duration, error) {
 	client := proxyClient()
-	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, dlURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -234,8 +273,7 @@ func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxByte
 	}
 	n, cerr := io.Copy(io.Discard, reader)
 	elapsed := time.Since(start)
-	// 到时(deadline)是预期的正常结束;文件提前下完也正常。只有时长内提前出错才算失败。
-	if dlCtx.Err() == context.DeadlineExceeded || cerr == nil {
+	if ctx.Err() == context.DeadlineExceeded || cerr == nil {
 		return n, elapsed, nil
 	}
 	return n, elapsed, cerr

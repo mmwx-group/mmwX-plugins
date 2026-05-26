@@ -22,6 +22,7 @@ type wsMsg struct {
 	ClashConfig string  `json:"clash_config,omitempty"`
 	Bytes       int64   `json:"bytes,omitempty"`
 	URL         string  `json:"url,omitempty"`
+	Threads     int     `json:"threads,omitempty"`
 	DownMbps    float64 `json:"down_mbps,omitempty"`
 	LatencyMs   int64   `json:"latency_ms,omitempty"`
 	EgressIP    string  `json:"egress_ip,omitempty"`
@@ -125,6 +126,7 @@ func runJob(job wsMsg, send func(wsMsg) error) {
 	res, terr := RunNodeTest(context.Background(), bin, job.ClashConfig, Options{
 		TestBytes: job.Bytes,
 		TestURL:   job.URL,
+		Threads:   job.Threads,
 	})
 	out := wsMsg{Type: "result", JobID: job.JobID, LatencyMs: res.LatencyMs, EgressIP: res.EgressIP}
 	if terr != nil {
