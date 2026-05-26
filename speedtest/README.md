@@ -37,6 +37,9 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 <details>
 <summary>更新日志</summary>
 
+### v0.0.5 (2026-05-26)
+- 🌈测速的时间改为15秒
+
 ### v0.0.4 (2026-05-26)
 - 🌈增加测速安装脚本
 - 🌈支持多线程测速
