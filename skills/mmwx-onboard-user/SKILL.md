@@ -16,10 +16,19 @@ description: 在妙妙屋X里开通一个新用户的完整流程——创建账
 3. **(可选)新建套餐**:`package_create`,参数 `name / traffic_limit_gb / cycle_days / nodes(节点ID数组) / traffic_mode(oneway|twoway) / speed_limit_mbps / device_limit`。记下返回的套餐 ID。
 4. **创建用户**:`user_create`,参数 `username / password`(可带 `email / nickname`)。
 5. **绑定套餐**:`package_assign`,参数 `username / package_id`(可带 `start_date / expire_date`,格式 YYYY-MM-DD;不传则用默认周期)。
-6. **核对**:`user_detail`(传 username)确认套餐、配额、订阅信息已生成。
-7. **交付**:把订阅信息告诉用户。如需临时/限时订阅,用 `temp_subscription_create`。
+6. **核对**:`user_detail`(传 username)确认套餐、配额已生成。
+7. **(可选)补 email / 备注**:`user_set_email`、`user_set_remark` 把用户信息补全(都是覆盖式更新,会写入 db)。
+8. **生成订阅文件**:`subscribe_file_create`,必填 `username`,可选:
+   - `template_id` 或 `template_filename` 绑定 V3 模板(先 `template_v3_list` 看可选模板)
+   - `custom_short_code` 自定义短码(字母/数字/_/- 长度 2-16)
+   - `selected_tags` V3 模板下的节点筛选标签
+   - `remark` 备注
+   返回的 short_code 拼成订阅 URL 给用户。`subscribe_file_list` 可复核结果。
+9. **交付**:把订阅 URL 告诉用户。如需临时/限时订阅,用 `temp_subscription_create`。
 
 ## 注意
-- 绑定套餐会异步生成订阅文件并下发入站凭据,核对前可稍等。
+- 绑定套餐会异步下发入站凭据,核对前可稍等。
+- **订阅文件必须显式 `subscribe_file_create` 创建**——绑套餐本身不会自动生成订阅文件。
 - 不要把密码明文回显在公开频道。
 - 若 `user_create` 报用户名已存在,改用其它用户名或先 `user_list` 核对。
+- 改订阅模板/筛选标签可用 `subscribe_file_update` 在线调整(无需重建)。

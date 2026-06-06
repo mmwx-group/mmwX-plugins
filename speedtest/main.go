@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -51,7 +53,8 @@ func main() {
 		log.Printf("[warn] mihomo 预热失败(测速时会重试): %v", err)
 	}
 
-	log.Printf("[speedtester] %s 启动,连接 %s", *name, *master)
+	log.Printf("[speedtester] %s 启动,主控=%s", *name, *master)
+	log.Printf("[speedtester] 拨号目标 %s", maskedURL(wsURL))
 	backoff := time.Second
 	for {
 		if err := connectAndServe(wsURL, *name); err != nil {
@@ -64,13 +67,47 @@ func main() {
 	}
 }
 
-func connectAndServe(wsURL, name string) error {
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+// maskedURL 隐藏 query 里的 token,避免日志泄露配对令牌。
+func maskedURL(s string) string {
+	u, err := url.Parse(s)
 	if err != nil {
+		return s
+	}
+	q := u.Query()
+	if tok := q.Get("token"); tok != "" {
+		if len(tok) > 8 {
+			q.Set("token", tok[:4]+"…"+tok[len(tok)-4:])
+		} else {
+			q.Set("token", "***")
+		}
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+func connectAndServe(wsURL, name string) error {
+	log.Printf("[speedtester] 正在拨号主控 WebSocket(15s 超时)...")
+	// DefaultDialer 没有 HandshakeTimeout,DNS / TCP 阻塞时会一直挂没反馈;
+	// 这里显式 15s 超时 + 失败时把 HTTP 状态码也打出来,便于区分:
+	//   - "no such host" → 主控 URL 域名错或 DNS 不通
+	//   - "connection refused" → 主控不在该地址监听
+	//   - "HTTP 401" → token 错或已过期
+	//   - "HTTP 404" → 主控版本太老,没有 /api/speedtest/tester/ws 端点
+	dialer := &websocket.Dialer{
+		HandshakeTimeout: 15 * time.Second,
+		Proxy:            http.ProxyFromEnvironment,
+	}
+	conn, resp, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		extra := ""
+		if resp != nil {
+			extra = fmt.Sprintf(" (HTTP %d %s)", resp.StatusCode, http.StatusText(resp.StatusCode))
+		}
+		log.Printf("[speedtester] ✗ 拨号失败: %v%s", err, extra)
 		return err
 	}
 	defer conn.Close()
-	log.Printf("[speedtester] 已连接主控")
+	log.Printf("[speedtester] ✓ 已连接主控,发送 hello")
 
 	var writeMu = make(chan struct{}, 1)
 	writeMu <- struct{}{}
