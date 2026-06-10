@@ -37,6 +37,9 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 <details>
 <summary>更新日志</summary>
 
+### vv0.1.0 (2026-06-10)
+- 🌈增加自动重连与docker镜像打包
+
 ### v0.0.9 (2026-06-06)
 - 🌈增加链接日志
 
