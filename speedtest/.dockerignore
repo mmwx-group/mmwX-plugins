@@ -1,0 +1,8 @@
+# Docker build 不需要这些
+.git
+.github
+*.md
+data/
+scripts/
+Dockerfile
+.dockerignore

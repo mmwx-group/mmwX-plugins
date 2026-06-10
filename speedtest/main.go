@@ -55,14 +55,25 @@ func main() {
 
 	log.Printf("[speedtester] %s 启动,主控=%s", *name, *master)
 	log.Printf("[speedtester] 拨号目标 %s", maskedURL(wsURL))
+
+	// 指数退避重连:1s → 2s → 4s ... 封顶 60s。connectAndServe 内每次成功握手后会通过
+	// resetBackoff 函数把它重置回 1s — 防止"一次断网长时间后,网恢复了仍要等 60s 才重连"。
 	backoff := time.Second
+	const maxBackoff = 60 * time.Second
+	resetBackoff := func() { backoff = time.Second }
 	for {
-		if err := connectAndServe(wsURL, *name); err != nil {
+		err := connectAndServe(wsURL, *name, resetBackoff)
+		if err != nil {
 			log.Printf("[speedtester] 连接断开: %v;%v 后重连", err, backoff)
+		} else {
+			// 正常 return 大概率不会发生(内部 for-loop 只在 read error 时 return),
+			// 真发生也按短间隔重连
+			log.Printf("[speedtester] 连接结束;%v 后重连", backoff)
 		}
 		time.Sleep(backoff)
-		if backoff < 30*time.Second {
-			backoff *= 2
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
 }
@@ -85,7 +96,19 @@ func maskedURL(s string) string {
 	return u.String()
 }
 
-func connectAndServe(wsURL, name string) error {
+// 心跳节奏 + 读超时设计:
+//   - 客户端每 30s 发一次应用层 ping(wsMsg{type:"ping"}),主控应回 pong
+//   - 同时挂 WebSocket 协议层 PongHandler,主控也可主动 ping 我们 → 我们回 pong
+//   - SetReadDeadline 设为 75s(2.5 × 30s 心跳间隔,容忍 1 次 pong 丢)
+//   - 收到任何消息(text / pong)都刷新 read deadline → 真没消息才会触发超时
+//
+// 这样既能检测主动死亡(对端崩 / NAT keepalive 失效 / 网线被拔),又不会因为偶发卡顿就误判断开。
+const (
+	heartbeatInterval = 30 * time.Second
+	readDeadline      = 75 * time.Second
+)
+
+func connectAndServe(wsURL, name string, onConnected func()) error {
 	log.Printf("[speedtester] 正在拨号主控 WebSocket(15s 超时)...")
 	// DefaultDialer 没有 HandshakeTimeout,DNS / TCP 阻塞时会一直挂没反馈;
 	// 这里显式 15s 超时 + 失败时把 HTTP 状态码也打出来,便于区分:
@@ -108,23 +131,35 @@ func connectAndServe(wsURL, name string) error {
 	}
 	defer conn.Close()
 	log.Printf("[speedtester] ✓ 已连接主控,发送 hello")
+	if onConnected != nil {
+		onConnected() // 重置 backoff,下次断开从 1s 重新开始
+	}
+
+	// 初始读超时 — 服务端必须在 readDeadline 内有任何消息(包括 pong),否则强制断
+	_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
+	// 收到协议层 pong 也算"活着" — 把 deadline 续上
+	conn.SetPongHandler(func(string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
+		return nil
+	})
 
 	var writeMu = make(chan struct{}, 1)
 	writeMu <- struct{}{}
 	send := func(m wsMsg) error {
 		<-writeMu
 		defer func() { writeMu <- struct{}{} }()
+		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		data, _ := json.Marshal(m)
 		return conn.WriteMessage(websocket.TextMessage, data)
 	}
 
 	_ = send(wsMsg{Type: "hello", Name: name})
 
-	// 心跳保活
+	// 心跳保活 — 应用层 ping(主控收到回 pong 一样会续 deadline)
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
-		t := time.NewTicker(30 * time.Second)
+		t := time.NewTicker(heartbeatInterval)
 		defer t.Stop()
 		for {
 			select {
@@ -143,6 +178,8 @@ func connectAndServe(wsURL, name string) error {
 		if err != nil {
 			return err
 		}
+		// 收到任何 text 帧都算活着,续 deadline
+		_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
 		var msg wsMsg
 		if json.Unmarshal(data, &msg) != nil {
 			continue
