@@ -3,6 +3,8 @@ package substore
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -479,6 +481,15 @@ func (p *EgernProducer) transformHysteria2(proxy, original Proxy) Proxy {
 
 	if IsPresent(proxy, "hop-interval") {
 		result["port_hopping_interval"] = GetString(proxy, "hop-interval")
+	}
+
+	// bandwidth：从 up 提取数字（对齐 Sub-Store egern）
+	if IsPresent(proxy, "up") {
+		n := 0
+		if m := regexp.MustCompile(`\d+`).FindString(GetString(proxy, "up")); m != "" {
+			n, _ = strconv.Atoi(m)
+		}
+		result["bandwidth"] = n
 	}
 
 	// Handle obfs
