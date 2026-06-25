@@ -1668,15 +1668,23 @@ func ParseSubscription(content string) ([]map[string]any, error) {
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || !strings.Contains(line, "://") {
+		if line == "" {
 			continue
 		}
 
-		proxy, err := Parse(line)
-		if err != nil {
+		if strings.Contains(line, "://") {
+			proxy, err := Parse(line)
+			if err != nil {
+				continue
+			}
+			proxies = append(proxies, proxy)
 			continue
 		}
-		proxies = append(proxies, proxy)
+
+		// 非 URI 行尝试按 Surge INI 行解析(目前仅 snell)
+		if node := parseSurgeLine(line); node != nil {
+			proxies = append(proxies, node)
+		}
 	}
 
 	return proxies, nil
