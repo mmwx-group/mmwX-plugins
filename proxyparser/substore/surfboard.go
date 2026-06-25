@@ -2,6 +2,7 @@ package substore
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -22,6 +23,36 @@ func NewSurfboardProducer() *SurfboardProducer {
 // GetType returns the producer type
 func (p *SurfboardProducer) GetType() string {
 	return p.producerType
+}
+
+// surfboardDigitsRegex 提取字符串中第一段连续数字(对齐 JS 的 `${proxy.down}`.match(/\d+/))
+var surfboardDigitsRegex = regexp.MustCompile(`\d+`)
+
+// surfboardHasNonBlankValue 对齐 JS hasNonBlankValue: 非 nil 且 trim 后非空
+func surfboardHasNonBlankValue(m map[string]interface{}, key string) bool {
+	val, ok := m[key]
+	if !ok || val == nil {
+		return false
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", val)) != ""
+}
+
+// surfboardAppendTlsParams 对齐 JS appendTlsProxyParams:
+// 追加 server-cert-fingerprint-sha256 / sni(带引号) / skip-cert-verify。
+// enabled=false 时整体跳过(对应 vmess/http/socks5 仅在 tls 时追加)。
+func (p *SurfboardProducer) surfboardAppendTlsParams(result *Result, proxy Proxy, enabled bool) {
+	if !enabled {
+		return
+	}
+
+	result.AppendIfPresent(",server-cert-fingerprint-sha256=%v", "tls-fingerprint")
+
+	// SNI - 兼容 SubStore 的 "sni" 与 miaomiaowu 的 "servername";JS 中带引号
+	if sni := GetSNI(proxy); sni != "" {
+		result.Append(fmt.Sprintf(`,sni="%s"`, sni))
+	}
+
+	result.AppendIfPresent(",skip-cert-verify=%v", "skip-cert-verify")
 }
 
 // Produce converts a single proxy to Surfboard format
@@ -74,13 +105,130 @@ func (p *SurfboardProducer) produceSingle(proxy Proxy) (string, error) {
 		return p.vmess(proxy)
 	case "http":
 		return p.http(proxy)
+	case "snell":
+		return p.snell(proxy)
 	case "socks5":
 		return p.socks5(proxy)
+	case "hysteria2":
+		return p.hysteria2(proxy)
 	case "wireguard-surge":
 		return p.wireguard(proxy)
-	default:
-		return "", fmt.Errorf("platform Surfboard does not support proxy type: %s", proxyType)
 	}
+
+	if proxyType == "anytls" {
+		// JS: 有 network 且(非 tcp,或 tcp 但带 reality-opts)则不支持
+		if IsPresent(proxy, "network") {
+			network := GetString(proxy, "network")
+			if network != "tcp" || IsPresent(proxy, "reality-opts") {
+				return "", fmt.Errorf("platform Surfboard does not support proxy type %s with network or REALITY", proxyType)
+			}
+		}
+		return p.anytls(proxy)
+	}
+
+	return "", fmt.Errorf("platform Surfboard does not support proxy type: %s", proxyType)
+}
+
+// hysteria2 converts a hysteria2 proxy to Surfboard format
+func (p *SurfboardProducer) hysteria2(proxy Proxy) (string, error) {
+	if IsPresent(proxy, "obfs") || IsPresent(proxy, "obfs-password") {
+		return "", fmt.Errorf("Surfboard Hysteria2 does not support obfs")
+	}
+
+	result := NewResult(proxy)
+	result.Append(fmt.Sprintf("%s=hysteria2,%s,%d",
+		GetString(proxy, "name"), GetString(proxy, "server"), GetInt(proxy, "port")))
+
+	result.AppendIfPresent(`,password="%v"`, "password")
+
+	if surfboardHasNonBlankValue(proxy, "ports") {
+		ports := strings.ReplaceAll(GetAnyString(proxy, "ports"), ",", ";")
+		result.Append(fmt.Sprintf(`,port-hopping="%s"`, ports))
+	}
+
+	if surfboardHasNonBlankValue(proxy, "hop-interval") {
+		result.Append(fmt.Sprintf(",port-hopping-interval=%s", GetAnyString(proxy, "hop-interval")))
+	}
+
+	// tls verification
+	p.surfboardAppendTlsParams(result, proxy, true)
+
+	// download-bandwidth: 提取 down 中的首段数字,无则 0(对齐 JS)
+	if IsPresent(proxy, "down") {
+		down := surfboardDigitsRegex.FindString(GetAnyString(proxy, "down"))
+		if down == "" {
+			down = "0"
+		}
+		result.Append(fmt.Sprintf(",download-bandwidth=%s", down))
+	}
+
+	// udp
+	result.AppendIfPresent(",udp-relay=%v", "udp")
+
+	result.AppendIfPresent(",block-quic=%v", "block-quic")
+
+	return result.String(), nil
+}
+
+// anytls converts an anytls proxy to Surfboard format
+func (p *SurfboardProducer) anytls(proxy Proxy) (string, error) {
+	result := NewResult(proxy)
+	result.Append(fmt.Sprintf("%s=%s,%s,%d",
+		GetString(proxy, "name"), GetString(proxy, "type"),
+		GetString(proxy, "server"), GetInt(proxy, "port")))
+
+	result.AppendIfPresent(`,password="%v"`, "password")
+
+	// tls verification
+	p.surfboardAppendTlsParams(result, proxy, true)
+
+	// tfo
+	result.AppendIfPresent(",tfo=%v", "tfo")
+
+	// udp
+	result.AppendIfPresent(",udp-relay=%v", "udp")
+
+	// reuse
+	result.AppendIfPresent(",reuse=%v", "reuse")
+
+	result.AppendIfPresent(",block-quic=%v", "block-quic")
+
+	return result.String(), nil
+}
+
+// snell converts a snell proxy to Surfboard format
+func (p *SurfboardProducer) snell(proxy Proxy) (string, error) {
+	if IsPresent(proxy, "version") {
+		version := GetInt(proxy, "version")
+		if version != 1 && version != 2 && version != 3 && version != 4 && version != 5 {
+			return "", fmt.Errorf("platform Surfboard does not support snell version %v", proxy["version"])
+		}
+	}
+
+	result := NewResult(proxy)
+	result.Append(fmt.Sprintf("%s=%s,%s,%d",
+		GetString(proxy, "name"), GetString(proxy, "type"),
+		GetString(proxy, "server"), GetInt(proxy, "port")))
+
+	result.AppendIfPresent(",version=%v", "version")
+	result.AppendIfPresent(`,psk="%v"`, "psk")
+
+	// obfs
+	result.AppendIfPresent(",obfs=%v", "obfs-opts.mode")
+	result.AppendIfPresent(",obfs-host=%v", "obfs-opts.host")
+	result.AppendIfPresent(",obfs-uri=%v", "obfs-opts.path")
+
+	// tfo
+	result.AppendIfPresent(",tfo=%v", "tfo")
+
+	// udp (仅 version >= 3)
+	if GetInt(proxy, "version") >= 3 {
+		result.AppendIfPresent(",udp-relay=%v", "udp")
+	}
+
+	result.AppendIfPresent(",block-quic=%v", "block-quic")
+
+	return result.String(), nil
 }
 
 // shadowsocks converts a shadowsocks proxy to Surfboard format
@@ -117,6 +265,8 @@ func (p *SurfboardProducer) shadowsocks(proxy Proxy) (string, error) {
 		"salsa20":                 true,
 		"chacha20":                true,
 		"chacha20-ietf":           true,
+		"2022-blake3-aes-128-gcm": true,
+		"2022-blake3-aes-256-gcm": true,
 	}
 
 	if !supportedCiphers[cipher] {
@@ -125,9 +275,7 @@ func (p *SurfboardProducer) shadowsocks(proxy Proxy) (string, error) {
 
 	result.Append(fmt.Sprintf(",encrypt-method=%s", cipher))
 
-	if IsPresent(proxy, "password") {
-		result.Append(fmt.Sprintf(",password=%s", GetString(proxy, "password")))
-	}
+	result.AppendIfPresent(`,password="%v"`, "password")
 
 	// Handle obfs plugin
 	if IsPresent(proxy, "plugin") {
@@ -136,13 +284,8 @@ func (p *SurfboardProducer) shadowsocks(proxy Proxy) (string, error) {
 			pluginOpts := GetMap(proxy, "plugin-opts")
 			if pluginOpts != nil {
 				result.Append(fmt.Sprintf(",obfs=%s", GetString(pluginOpts, "mode")))
-
-				if IsPresent(pluginOpts, "host") {
-					result.Append(fmt.Sprintf(",obfs-host=%s", GetString(pluginOpts, "host")))
-				}
-				if IsPresent(pluginOpts, "path") {
-					result.Append(fmt.Sprintf(",obfs-uri=%s", GetString(pluginOpts, "path")))
-				}
+				result.AppendIfPresent(",obfs-host=%v", "plugin-opts.host")
+				result.AppendIfPresent(",obfs-uri=%v", "plugin-opts.path")
 			}
 		} else {
 			return "", fmt.Errorf("plugin %s is not supported", plugin)
@@ -150,9 +293,9 @@ func (p *SurfboardProducer) shadowsocks(proxy Proxy) (string, error) {
 	}
 
 	// UDP relay
-	if IsPresent(proxy, "udp") {
-		result.Append(fmt.Sprintf(",udp-relay=%v", GetBool(proxy, "udp")))
-	}
+	result.AppendIfPresent(",udp-relay=%v", "udp")
+
+	result.AppendIfPresent(",block-quic=%v", "block-quic")
 
 	return result.String(), nil
 }
@@ -168,35 +311,26 @@ func (p *SurfboardProducer) trojan(proxy Proxy) (string, error) {
 
 	result.Append(fmt.Sprintf("%s=%s,%s,%d", name, proxyType, server, port))
 
-	if IsPresent(proxy, "password") {
-		result.Append(fmt.Sprintf(",password=%s", GetString(proxy, "password")))
-	}
+	result.AppendIfPresent(",password=%v", "password")
 
 	// Transport
-	p.handleTransport(result, proxy)
+	if err := p.handleTransport(result, proxy); err != nil {
+		return "", err
+	}
 
 	// TLS
-	if IsPresent(proxy, "tls") {
-		result.Append(fmt.Sprintf(",tls=%v", GetBool(proxy, "tls")))
-	}
+	result.AppendIfPresent(",tls=%v", "tls")
 
-	// TLS verification
-	if IsPresent(proxy, "servername") {
-		result.Append(fmt.Sprintf(",sni=%s", GetString(proxy, "servername")))
-	}
-	if IsPresent(proxy, "skip-cert-verify") {
-		result.Append(fmt.Sprintf(",skip-cert-verify=%v", GetBool(proxy, "skip-cert-verify")))
-	}
+	// tls verification
+	p.surfboardAppendTlsParams(result, proxy, true)
 
 	// TFO
-	if IsPresent(proxy, "tfo") {
-		result.Append(fmt.Sprintf(",tfo=%v", GetBool(proxy, "tfo")))
-	}
+	result.AppendIfPresent(",tfo=%v", "tfo")
 
 	// UDP relay
-	if IsPresent(proxy, "udp") {
-		result.Append(fmt.Sprintf(",udp-relay=%v", GetBool(proxy, "udp")))
-	}
+	result.AppendIfPresent(",udp-relay=%v", "udp")
+
+	result.AppendIfPresent(",block-quic=%v", "block-quic")
 
 	return result.String(), nil
 }
@@ -212,12 +346,12 @@ func (p *SurfboardProducer) vmess(proxy Proxy) (string, error) {
 
 	result.Append(fmt.Sprintf("%s=%s,%s,%d", name, proxyType, server, port))
 
-	if IsPresent(proxy, "uuid") {
-		result.Append(fmt.Sprintf(",username=%s", GetString(proxy, "uuid")))
-	}
+	result.AppendIfPresent(",username=%v", "uuid")
 
 	// Transport
-	p.handleTransport(result, proxy)
+	if err := p.handleTransport(result, proxy); err != nil {
+		return "", err
+	}
 
 	// AEAD
 	if IsPresent(proxy, "aead") {
@@ -228,22 +362,15 @@ func (p *SurfboardProducer) vmess(proxy Proxy) (string, error) {
 	}
 
 	// TLS
-	if IsPresent(proxy, "tls") {
-		result.Append(fmt.Sprintf(",tls=%v", GetBool(proxy, "tls")))
-	}
+	result.AppendIfPresent(",tls=%v", "tls")
 
-	// TLS verification
-	if IsPresent(proxy, "servernamesni") {
-		result.Append(fmt.Sprintf(",sni=%s", GetString(proxy, "servername")))
-	}
-	if IsPresent(proxy, "skip-cert-verify") {
-		result.Append(fmt.Sprintf(",skip-cert-verify=%v", GetBool(proxy, "skip-cert-verify")))
-	}
+	// tls verification (仅在 tls 为真时追加,对齐 JS Boolean(proxy.tls))
+	p.surfboardAppendTlsParams(result, proxy, GetBool(proxy, "tls"))
 
 	// UDP relay
-	if IsPresent(proxy, "udp") {
-		result.Append(fmt.Sprintf(",udp-relay=%v", GetBool(proxy, "udp")))
-	}
+	result.AppendIfPresent(",udp-relay=%v", "udp")
+
+	result.AppendIfPresent(",block-quic=%v", "block-quic")
 
 	return result.String(), nil
 }
@@ -264,25 +391,16 @@ func (p *SurfboardProducer) http(proxy Proxy) (string, error) {
 
 	result.Append(fmt.Sprintf("%s=%s,%s,%d", name, proxyType, server, port))
 
-	if IsPresent(proxy, "username") {
-		result.Append(fmt.Sprintf(",%s", GetString(proxy, "username")))
-	}
-	if IsPresent(proxy, "password") {
-		result.Append(fmt.Sprintf(",%s", GetString(proxy, "password")))
-	}
+	result.AppendIfPresent(",%v", "username")
+	result.AppendIfPresent(",%v", "password")
 
-	// TLS verification
-	if IsPresent(proxy, "servername") {
-		result.Append(fmt.Sprintf(",sni=%s", GetString(proxy, "servername")))
-	}
-	if IsPresent(proxy, "skip-cert-verify") {
-		result.Append(fmt.Sprintf(",skip-cert-verify=%v", GetBool(proxy, "skip-cert-verify")))
-	}
+	// tls verification (仅在 tls 为真时追加)
+	p.surfboardAppendTlsParams(result, proxy, tls)
 
 	// UDP relay
-	if IsPresent(proxy, "udp") {
-		result.Append(fmt.Sprintf(",udp-relay=%v", GetBool(proxy, "udp")))
-	}
+	result.AppendIfPresent(",udp-relay=%v", "udp")
+
+	result.AppendIfPresent(",block-quic=%v", "block-quic")
 
 	return result.String(), nil
 }
@@ -303,25 +421,16 @@ func (p *SurfboardProducer) socks5(proxy Proxy) (string, error) {
 
 	result.Append(fmt.Sprintf("%s=%s,%s,%d", name, proxyType, server, port))
 
-	if IsPresent(proxy, "username") {
-		result.Append(fmt.Sprintf(",%s", GetString(proxy, "username")))
-	}
-	if IsPresent(proxy, "password") {
-		result.Append(fmt.Sprintf(",%s", GetString(proxy, "password")))
-	}
+	result.AppendIfPresent(",%v", "username")
+	result.AppendIfPresent(",%v", "password")
 
-	// TLS verification
-	if IsPresent(proxy, "servername") {
-		result.Append(fmt.Sprintf(",sni=%s", GetString(proxy, "servername")))
-	}
-	if IsPresent(proxy, "skip-cert-verify") {
-		result.Append(fmt.Sprintf(",skip-cert-verify=%v", GetBool(proxy, "skip-cert-verify")))
-	}
+	// tls verification (仅在 tls 为真时追加)
+	p.surfboardAppendTlsParams(result, proxy, tls)
 
 	// UDP relay
-	if IsPresent(proxy, "udp") {
-		result.Append(fmt.Sprintf(",udp-relay=%v", GetBool(proxy, "udp")))
-	}
+	result.AppendIfPresent(",udp-relay=%v", "udp")
+
+	result.AppendIfPresent(",block-quic=%v", "block-quic")
 
 	return result.String(), nil
 }
@@ -333,51 +442,53 @@ func (p *SurfboardProducer) wireguard(proxy Proxy) (string, error) {
 	name := GetString(proxy, "name")
 	result.Append(fmt.Sprintf("%s=wireguard", name))
 
-	if IsPresent(proxy, "section-name") {
-		result.Append(fmt.Sprintf(",section-name=%s", GetString(proxy, "section-name")))
-	}
+	result.AppendIfPresent(",section-name=%v", "section-name")
+
+	result.AppendIfPresent(",block-quic=%v", "block-quic")
 
 	return result.String(), nil
 }
 
 // handleTransport handles transport layer configuration
-func (p *SurfboardProducer) handleTransport(result *Result, proxy Proxy) {
+func (p *SurfboardProducer) handleTransport(result *Result, proxy Proxy) error {
 	if !IsPresent(proxy, "network") {
-		return
+		return nil
 	}
 
 	network := GetString(proxy, "network")
-	if network == "ws" {
+	switch {
+	case network == "ws":
 		result.Append(",ws=true")
 
 		if IsPresent(proxy, "ws-opts") {
-			wsOpts := GetMap(proxy, "ws-opts")
-			if wsOpts != nil {
-				if IsPresent(wsOpts, "path") {
-					result.Append(fmt.Sprintf(",ws-path=%s", GetString(wsOpts, "path")))
-				}
+			result.AppendIfPresent(",ws-path=%v", "ws-opts.path")
 
-				if IsPresent(wsOpts, "headers") {
-					headers := GetMap(wsOpts, "headers")
-					if headers != nil {
-						headerParts := make([]string, 0)
-						for k, v := range headers {
-							value := fmt.Sprintf("%v", v)
-							// Quote Host header value
-							if k == "Host" {
-								value = fmt.Sprintf(`"%s"`, value)
-							}
-							headerParts = append(headerParts, fmt.Sprintf("%s:%s", k, value))
+			if IsPresent(proxy, "ws-opts", "headers") {
+				headers := GetMap(GetMap(proxy, "ws-opts"), "headers")
+				if headers != nil {
+					headerParts := make([]string, 0)
+					for k, v := range headers {
+						value := fmt.Sprintf("%v", v)
+						// Quote Host header value
+						if k == "Host" {
+							value = fmt.Sprintf(`"%s"`, value)
 						}
-						if len(headerParts) > 0 {
-							result.Append(fmt.Sprintf(",ws-headers=%s", strings.Join(headerParts, "|")))
-						}
+						headerParts = append(headerParts, fmt.Sprintf("%s:%s", k, value))
+					}
+					joined := strings.Join(headerParts, "|")
+					if IsNotBlank(joined) {
+						result.Append(fmt.Sprintf(",ws-headers=%s", joined))
 					}
 				}
 			}
 		}
-	} else {
-		// Unsupported network type
-		result.Append(fmt.Sprintf(",network=%s", network))
+	case network == "tcp" && IsPresent(proxy, "reality-opts"):
+		// 对齐 JS:tcp + reality 不支持
+		return fmt.Errorf("reality is unsupported")
+	case network != "tcp":
+		// 对齐 JS:非 tcp(非 ws)网络不支持
+		return fmt.Errorf("network %s is unsupported", network)
 	}
+
+	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -33,6 +34,175 @@ func isIPv6(addr string) bool {
 		return false
 	}
 	return ip.To4() == nil
+}
+
+// uriEncodeComponent 对齐 JS encodeURIComponent:
+//   - 空格编码为 %20 (而非 url.QueryEscape 的 +)
+//   - 不转义 ! ' ( ) * - _ . ~ 及字母数字
+//
+// 这是 URI producer 的关键编码差异: 直接用 url.QueryEscape 会把空格变成 +
+// 导致部分客户端把节点名/参数解析错误。
+func uriEncodeComponent(s string) string {
+	const upperhex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		// encodeURIComponent 不转义的字符集
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' ||
+			c == '\'' || c == '(' || c == ')' {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('%')
+			b.WriteByte(upperhex[c>>4])
+			b.WriteByte(upperhex[c&0x0F])
+		}
+	}
+	return b.String()
+}
+
+// uriTruthy 镜像 JS 真值判断 (if (proxy[key]))。注意:JS 中数字 0 为假,但字符串 "0" 为真;
+// 空串/nil/false/数字 0 视为假,其余为真。
+func uriTruthy(v interface{}) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case string:
+		return t != ""
+	case int:
+		return t != 0
+	case int64:
+		return t != 0
+	case float64:
+		return t != 0
+	default:
+		return true
+	}
+}
+
+// uriFirstString 取值: 若为数组取首元素, 否则转字符串。对齐 JS Array.isArray(x) ? x[0] : x。
+func uriFirstString(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case []interface{}:
+		if len(t) > 0 {
+			return fmt.Sprintf("%v", t[0])
+		}
+		return ""
+	case []string:
+		if len(t) > 0 {
+			return t[0]
+		}
+		return ""
+	default:
+		return fmt.Sprintf("%v", t)
+	}
+}
+
+// uriNormalizePluginMux 对齐 JS normalizePluginMuxValue: bool→0/1, 数字字符串→原值, 否则空。
+// 返回空串表示不输出 mux。
+func uriNormalizePluginMux(mux interface{}) string {
+	switch v := mux.(type) {
+	case nil:
+		return ""
+	case bool:
+		if v {
+			return "1"
+		}
+		return "0"
+	case int:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case float64:
+		return fmt.Sprintf("%d", int64(v))
+	case string:
+		n := strings.ToLower(strings.TrimSpace(v))
+		if n == "true" {
+			return "1"
+		}
+		if n == "false" {
+			return "0"
+		}
+		if regexpDigits.MatchString(n) {
+			return n
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+var regexpDigits = regexp.MustCompile(`^\d+$`)
+
+// uriVmessSecurityAliases 对齐 JS vmess-security.js 的别名映射
+var uriVmessSecurityAliases = map[string]string{
+	"chacha20-ietf-poly1305": "chacha20-poly1305",
+}
+
+// uriVmessSecurityCommon 对齐 JS VMESS_SECURITY_COMMON_VALUES
+var uriVmessSecurityCommon = map[string]bool{
+	"auto":              true,
+	"none":              true,
+	"zero":              true,
+	"aes-128-gcm":       true,
+	"chacha20-poly1305": true,
+}
+
+// uriNormalizeVmessSecurity 对齐 JS normalizeVmessSecurity:
+// 归一化 cipher 到受支持的值, 不支持则回退 "auto"。
+func uriNormalizeVmessSecurity(security string) string {
+	normalized := strings.ToLower(strings.TrimSpace(security))
+	if normalized == "" {
+		return "auto"
+	}
+	if uriVmessSecurityCommon[normalized] {
+		if canonical, ok := uriVmessSecurityAliases[normalized]; ok {
+			return canonical
+		}
+		return normalized
+	}
+	// 别名归一后再次匹配
+	if canonical, ok := uriVmessSecurityAliases[normalized]; ok {
+		if uriVmessSecurityCommon[canonical] {
+			return canonical
+		}
+	}
+	return "auto"
+}
+
+// uriGetWireGuardAddressWithCIDR 对齐 JS getWireGuardAddressWithCIDR:
+// 读取 ip/ipv6 及其 *-cidr, 返回 "host/cidr"。无效地址返回空串。
+func uriGetWireGuardAddressWithCIDR(proxy Proxy, family string) string {
+	var addrKey, cidrKey string
+	var defaultCIDR int
+	if family == "ipv6" {
+		addrKey, cidrKey, defaultCIDR = "ipv6", "ipv6-cidr", 128
+	} else {
+		addrKey, cidrKey, defaultCIDR = "ip", "ip-cidr", 32
+	}
+	host := strings.TrimSpace(GetString(proxy, addrKey))
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	if host == "" {
+		return ""
+	}
+	max := 32
+	if family == "ipv6" {
+		max = 128
+	}
+	cidr := defaultCIDR
+	if IsPresent(proxy, cidrKey) {
+		if c := GetInt(proxy, cidrKey); c >= 0 && c <= max {
+			cidr = c
+		}
+	}
+	return fmt.Sprintf("%s/%d", host, cidr)
 }
 
 // preprocessProxy performs preprocessing on proxy before encoding
@@ -156,6 +326,10 @@ func (p *URIProducer) encodeVMess(proxy Proxy) (string, error) {
 	// Handle network type conversion (frontend line 376-386)
 	network := GetString(proxy, "network")
 	net := network
+	if net == "" {
+		// JS: net = proxy.network || 'tcp'
+		net = "tcp"
+	}
 	typeField := ""
 
 	if network == "http" {
@@ -176,7 +350,7 @@ func (p *URIProducer) encodeVMess(proxy Proxy) (string, error) {
 		"port": fmt.Sprintf("%d", GetInt(proxy, "port")),
 		"id":   GetString(proxy, "uuid"),
 		"aid":  fmt.Sprintf("%d", GetInt(proxy, "alterId")),
-		"scy":  GetString(proxy, "cipher"),
+		"scy":  uriNormalizeVmessSecurity(GetString(proxy, "cipher")),
 		"net":  net,
 		"type": typeField,
 		"tls":  "",
@@ -200,10 +374,7 @@ func (p *URIProducer) encodeVMess(proxy Proxy) (string, error) {
 		config["fp"] = fp
 	}
 
-	// UDP (frontend line 407-409)
-	if udp, ok := proxy["udp"]; ok {
-		config["udp"] = udp
-	}
+	// 注: JS vmess 配置对象不包含 udp 字段(此前 Go 多输出 udp, 已移除以对齐 JS)。
 
 	// Network specific options (frontend line 411-454)
 	if network != "" {
@@ -297,7 +468,8 @@ func (p *URIProducer) encodeVLESS(proxy Proxy) (string, error) {
 	params.Set("security", security)
 
 	// SNI
-	if sni := GetString(proxy, "servername"); sni != "" {
+	// 注: preprocessProxy 已将 servername 复制到 sni, JS 读 proxy.sni。
+	if sni := GetSNI(proxy); sni != "" {
 		params.Set("sni", sni)
 	}
 
@@ -309,6 +481,16 @@ func (p *URIProducer) encodeVLESS(proxy Proxy) (string, error) {
 	// Fingerprint
 	if fp := GetString(proxy, "client-fingerprint"); fp != "" {
 		params.Set("fp", fp)
+	}
+
+	// tls-fingerprint → pcs (JS line 596-598)
+	if pcs := GetString(proxy, "tls-fingerprint"); pcs != "" {
+		params.Set("pcs", pcs)
+	}
+
+	// _h2 (JS line 591-594)
+	if GetBool(proxy, "_h2") {
+		params.Set("h2", "1")
 	}
 
 	// Flow
@@ -326,7 +508,7 @@ func (p *URIProducer) encodeVLESS(proxy Proxy) (string, error) {
 		params.Set("encryption", encryption)
 	}
 
-	// Network type (frontend line 187-190)
+	// Network type (JS line 652-664)
 	network := GetString(proxy, "network")
 	vlessType := network
 	switch network {
@@ -338,10 +520,25 @@ func (p *URIProducer) encodeVLESS(proxy Proxy) (string, error) {
 				vlessType = "httpupgrade"
 			}
 		}
+	case "http":
+		// JS: vlessType = 'tcp', 并追加 headerType=http
+		vlessType = "tcp"
+	case "h2":
+		// JS: vlessType = 'http'
+		vlessType = "http"
 	}
 
 	if vlessType != "" {
 		params.Set("type", vlessType)
+	}
+	if network == "http" {
+		params.Set("headerType", "http")
+		// http-opts.method (JS line 719-723)
+		if httpOpts := GetMap(proxy, "http-opts"); httpOpts != nil {
+			if method := GetString(httpOpts, "method"); method != "" {
+				params.Set("method", method)
+			}
+		}
 	}
 
 	// Mode, extra, pqv parameters (frontend line 175-182)
@@ -420,29 +617,50 @@ func (p *URIProducer) encodeVLESS(proxy Proxy) (string, error) {
 			}
 		}
 	case "kcp":
-		if kcpOpts := GetMap(proxy, "kcp-opts"); kcpOpts != nil {
-			if seed := GetString(kcpOpts, "seed"); seed != "" {
-				params.Set("seed", seed)
-			}
-			if headerType := GetString(kcpOpts, "headerType"); headerType != "" {
-				params.Set("headerType", headerType)
-			}
+		// JS line 724-733: seed/headerType 取自 proxy 根字段 (非 kcp-opts)
+		if seed := GetString(proxy, "seed"); seed != "" {
+			params.Set("seed", seed)
+		}
+		if headerType := GetString(proxy, "headerType"); headerType != "" {
+			params.Set("headerType", headerType)
 		}
 	}
 
-	// UDP parameter (frontend line 244-247)
-	if udp, ok := proxy["udp"]; ok {
-		if udpBool, ok := udp.(bool); ok {
-			if udpBool {
-				params.Set("udp", "1")
-			} else {
-				params.Set("udp", "0")
-			}
+	// packetEncoding (JS line 751-774)
+	// 注: JS VLESS 不输出 udp 参数, 而是按 packet-encoding/xudp/packet-addr/udp 推导 packetEncoding。
+	canonicalPacketEncoding := ""
+	hasPacketEncoding := false
+	if pe, ok := proxy["packet-encoding"]; ok && pe != nil {
+		canonicalPacketEncoding = strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", pe)))
+		hasPacketEncoding = true
+	} else if GetBool(proxy, "xudp") {
+		canonicalPacketEncoding = "xudp"
+		hasPacketEncoding = true
+	} else if GetBool(proxy, "packet-addr") {
+		canonicalPacketEncoding = "packetaddr"
+		hasPacketEncoding = true
+	} else if u, ok := proxy["udp"]; ok {
+		if b, ok := u.(bool); ok && b {
+			// udp === true → canonicalPacketEncoding = '' → packetEncoding=none
+			canonicalPacketEncoding = ""
+			hasPacketEncoding = true
+		}
+	}
+	if hasPacketEncoding {
+		switch canonicalPacketEncoding {
+		case "":
+			params.Set("packetEncoding", "none")
+		case "packetaddr":
+			params.Set("packetEncoding", "packet")
+		case "xudp":
+			params.Set("packetEncoding", "xudp")
 		}
 	}
 
+	// fragment 用 uriEncodeComponent 对齐 JS encodeURIComponent(proxy.name)
+	// (url.PathEscape 不会转义 & = , 等, 与 JS 不一致)。
 	uri := fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-		uuid, server, port, params.Encode(), url.PathEscape(name))
+		uuid, server, port, params.Encode(), uriEncodeComponent(name))
 	return uri, nil
 }
 
@@ -478,6 +696,11 @@ func (p *URIProducer) encodeTrojan(proxy Proxy) (string, error) {
 	// Fingerprint
 	if fp := GetString(proxy, "client-fingerprint"); fp != "" {
 		params.Set("fp", fp)
+	}
+
+	// tls-fingerprint → pcs (JS line 1189-1194)
+	if pcs := GetString(proxy, "tls-fingerprint"); pcs != "" {
+		params.Set("pcs", pcs)
 	}
 
 	// Reality support (frontend line 526-555)
@@ -544,23 +767,23 @@ func (p *URIProducer) encodeTrojan(proxy Proxy) (string, error) {
 		}
 	}
 
-	// UDP parameter (frontend line 557-560)
-	if udp, ok := proxy["udp"]; ok {
-		if udpBool, ok := udp.(bool); ok {
-			if udpBool {
-				params.Set("udp", "1")
-			} else {
-				params.Set("udp", "0")
-			}
-		}
-	}
+	// 注: JS trojan 不输出 udp 参数, 故此处不再追加 (此前 Go 多输出 udp, 已纠正)。
 
+	// fragment 用 uriEncodeComponent 对齐 JS encodeURIComponent(proxy.name)。
 	uri := fmt.Sprintf("trojan://%s@%s:%d?%s#%s",
-		password, server, port, params.Encode(), url.PathEscape(name))
+		password, server, port, params.Encode(), uriEncodeComponent(name))
 	return uri, nil
 }
 
-// encodeShadowsocks encodes Shadowsocks proxy to ss:// URI (matches frontend)
+// encodeShadowsocks encodes Shadowsocks proxy to ss:// URI (aligned to JS uri.js case 'ss')
+// 重要纠正点:
+//  1. 2022-blake3-* cipher 不做 base64, 而是 encodeURIComponent(cipher):encodeURIComponent(password)
+//  2. 补齐 transport(type/grpc/ws path+host)、fp、alpn、reality(security/pbk/sid/spx/mode/extra)、security=tls
+//  3. v2ray-plugin 同时输出 mode/host(兼容), 并补 path/tls/sni/skip-cert-verify/mux
+//  4. JS ss 不输出 udp 参数(此前 Go 多输出, 已移除)
+//
+// 注: 为与 JS encodeURIComponent 的编码一致(空格 %20 而非 +, 保留 ; 的转义),
+// 此处手动拼接 query 字符串, 不用 url.Values.Encode()(它会把空格编码为 + 并排序 key)。
 func (p *URIProducer) encodeShadowsocks(proxy Proxy) (string, error) {
 	server := GetString(proxy, "server")
 	port := GetInt(proxy, "port")
@@ -568,93 +791,170 @@ func (p *URIProducer) encodeShadowsocks(proxy Proxy) (string, error) {
 	password := GetString(proxy, "password")
 	name := GetString(proxy, "name")
 
-	// Format: method:password (frontend line 305-313)
-	userInfo := fmt.Sprintf("%s:%s", cipher, password)
-	encoded := base64.StdEncoding.EncodeToString([]byte(userInfo))
+	// userinfo: 2022-blake3-* 不 base64 (JS line 828-832)
+	var userInfoPart string
+	if strings.HasPrefix(cipher, "2022-blake3-") {
+		userInfoPart = uriEncodeComponent(cipher) + ":" + uriEncodeComponent(password)
+	} else {
+		userInfoPart = base64.StdEncoding.EncodeToString([]byte(cipher + ":" + password))
+	}
 
-	uri := fmt.Sprintf("ss://%s@%s:%d", encoded, server, port)
-
-	// Plugin support (frontend line 314-342)
 	plugin := GetString(proxy, "plugin")
+	pluginSlash := ""
 	if plugin != "" {
-		uri += "/"
+		pluginSlash = "/"
+	}
+	uri := fmt.Sprintf("ss://%s@%s:%d%s", userInfoPart, server, port, pluginSlash)
+
+	// query 以 "&" 起头, 末尾 replace(/^&/, '?') (JS line 834-997)
+	var query strings.Builder
+
+	if plugin != "" {
+		opts := GetMap(proxy, "plugin-opts")
+		query.WriteString("&plugin=")
+		switch plugin {
+		case "obfs":
+			s := fmt.Sprintf("simple-obfs;obfs=%s", GetString(opts, "mode"))
+			if host := GetString(opts, "host"); host != "" {
+				s += ";obfs-host=" + host
+			}
+			query.WriteString(uriEncodeComponent(s))
+		case "v2ray-plugin":
+			mode := GetString(opts, "mode")
+			host := GetString(opts, "host")
+			s := fmt.Sprintf("v2ray-plugin;obfs=%s;mode=%s", mode, mode)
+			if host != "" {
+				s += ";obfs-host=" + host + ";host=" + host
+			}
+			if path := GetString(opts, "path"); path != "" {
+				s += ";path=" + path
+			}
+			if GetBool(opts, "tls") {
+				s += ";tls"
+			}
+			if sni := GetString(opts, "sni"); sni != "" {
+				s += ";sni=" + sni
+			}
+			if scv, ok := opts["skip-cert-verify"]; ok && scv != nil {
+				s += fmt.Sprintf(";skip-cert-verify=%v", scv)
+			}
+			if mux := uriNormalizePluginMux(opts["mux"]); mux != "" {
+				s += ";mux=" + mux
+			}
+			query.WriteString(uriEncodeComponent(s))
+		case "shadow-tls":
+			s := fmt.Sprintf("shadow-tls;host=%s;password=%s;version=%d",
+				GetString(opts, "host"), GetString(opts, "password"), GetInt(opts, "version"))
+			query.WriteString(uriEncodeComponent(s))
+		default:
+			return "", fmt.Errorf("unsupported plugin option: %s", plugin)
+		}
 	}
 
-	params := url.Values{}
-	hasPlugin := false
-
-	if plugin == "obfs" {
-		opts := GetMap(proxy, "plugin-opts")
-		mode := GetString(opts, "mode")
-		host := GetString(opts, "host")
-		pluginStr := fmt.Sprintf("simple-obfs;obfs=%s", mode)
-		if host != "" {
-			pluginStr += ";obfs-host=" + host
-		}
-		params.Set("plugin", pluginStr)
-		hasPlugin = true
-	} else if plugin == "v2ray-plugin" {
-		opts := GetMap(proxy, "plugin-opts")
-		mode := GetString(opts, "mode")
-		host := GetString(opts, "host")
-		tls := GetBool(opts, "tls")
-		pluginStr := fmt.Sprintf("v2ray-plugin;obfs=%s", mode)
-		if host != "" {
-			pluginStr += ";obfs-host=" + host
-		}
-		if tls {
-			pluginStr += ";tls"
-		}
-		params.Set("plugin", pluginStr)
-		hasPlugin = true
-	} else if plugin == "shadow-tls" {
-		opts := GetMap(proxy, "plugin-opts")
-		host := GetString(opts, "host")
-		pass := GetString(opts, "password")
-		version := GetInt(opts, "version")
-		pluginStr := fmt.Sprintf("shadow-tls;host=%s;password=%s;version=%d", host, pass, version)
-		params.Set("plugin", pluginStr)
-		hasPlugin = true
-	}
-
-	// UDP over TCP (frontend line 343-345)
+	// uot / tfo (JS line 875-880); 注: JS ss 不输出 udp
 	if GetBool(proxy, "udp-over-tcp") {
-		params.Set("uot", "1")
+		query.WriteString("&uot=1")
 	}
-
-	// TFO (frontend line 346-350)
 	if GetBool(proxy, "tfo") {
-		params.Set("tfo", "1")
+		query.WriteString("&tfo=1")
 	}
 
-	// UDP (frontend line 351-355)
-	if udp, ok := proxy["udp"]; ok {
-		if udpBool, ok := udp.(bool); ok {
-			if udpBool {
-				params.Set("udp", "1")
-			} else {
-				params.Set("udp", "0")
+	// transport (JS line 881-946)
+	network := GetString(proxy, "network")
+	if network != "" {
+		ssType := network
+		if network == "ws" {
+			if wsOpts := GetMap(proxy, "ws-opts"); wsOpts != nil && GetBool(wsOpts, "v2ray-http-upgrade") {
+				ssType = "httpupgrade"
+			}
+		}
+		query.WriteString("&type=" + uriEncodeComponent(ssType))
+		if network == "grpc" {
+			if grpcOpts := GetMap(proxy, "grpc-opts"); grpcOpts != nil {
+				if sn := GetString(grpcOpts, "grpc-service-name"); sn != "" {
+					query.WriteString("&serviceName=" + uriEncodeComponent(sn))
+				}
+				if auth := GetString(grpcOpts, "_grpc-authority"); auth != "" {
+					query.WriteString("&authority=" + uriEncodeComponent(auth))
+				}
+				gt := GetString(grpcOpts, "_grpc-type")
+				if gt == "" {
+					gt = "gun"
+				}
+				query.WriteString("&mode=" + uriEncodeComponent(gt))
+			}
+		}
+		// path/host (JS 913-945); ws/其它 transport-opts
+		if opts := GetMap(proxy, network+"-opts"); opts != nil {
+			path := uriFirstString(opts["path"])
+			if path != "" {
+				query.WriteString("&path=" + uriEncodeComponent(path))
+			}
+			if headers := GetMap(opts, "headers"); headers != nil {
+				host := uriFirstString(headers["Host"])
+				if host != "" {
+					query.WriteString("&host=" + uriEncodeComponent(host))
+				}
 			}
 		}
 	}
 
-	// Append parameters
-	if hasPlugin || len(params) > 0 {
-		paramStr := params.Encode()
-		if paramStr != "" {
-			if !hasPlugin {
-				uri += "?" + paramStr
-			} else {
-				uri += "?" + paramStr
-			}
+	// alpn / fp (JS line 947-960)
+	if alpn := GetStringSlice(proxy, "alpn"); len(alpn) > 0 {
+		query.WriteString("&alpn=" + uriEncodeComponent(strings.Join(alpn, ",")))
+	}
+	if fp := GetString(proxy, "client-fingerprint"); fp != "" {
+		query.WriteString("&fp=" + uriEncodeComponent(fp))
+	}
+
+	// security / reality (JS line 961-993)
+	if realityOpts := GetMap(proxy, "reality-opts"); realityOpts != nil {
+		query.WriteString("&security=reality")
+		if pbk := GetString(realityOpts, "public-key"); pbk != "" {
+			query.WriteString("&pbk=" + uriEncodeComponent(pbk))
+		}
+		if sid := GetAnyString(realityOpts, "short-id"); sid != "" {
+			query.WriteString("&sid=" + uriEncodeComponent(sid))
+		}
+		if spx := GetString(realityOpts, "_spider-x"); spx != "" {
+			query.WriteString("&spx=" + uriEncodeComponent(spx))
+		}
+		if extra := GetString(proxy, "_extra"); extra != "" {
+			query.WriteString("&extra=" + uriEncodeComponent(extra))
+		}
+		if mode := GetString(proxy, "_mode"); mode != "" {
+			query.WriteString("&mode=" + uriEncodeComponent(mode))
+		}
+	} else if GetBool(proxy, "tls") {
+		query.WriteString("&security=tls")
+	}
+
+	// sni / allowInsecure 仅在 tls 时输出 (JS line 989-993)
+	if GetBool(proxy, "tls") {
+		sni := GetString(proxy, "sni")
+		if sni == "" {
+			sni = server
+		}
+		query.WriteString("&sni=" + uriEncodeComponent(sni))
+		if GetBool(proxy, "skip-cert-verify") {
+			query.WriteString("&allowInsecure=1")
 		}
 	}
 
-	uri += "#" + url.PathEscape(name)
+	q := query.String()
+	if len(q) > 0 && q[0] == '&' {
+		q = "?" + q[1:]
+	}
+	uri += q + "#" + uriEncodeComponent(name)
 	return uri, nil
 }
 
-// encodeShadowsocksR encodes ShadowsocksR proxy to ssr:// URI
+// encodeShadowsocksR encodes ShadowsocksR proxy to ssr:// URI (aligned to JS uri.js case 'ssr')
+// 重要纠正点:
+//  1. 参数名 protocolparam (此前 Go 写成 protoparam, 会导致 SSR 协议参数失效)
+//  2. 全部使用标准 base64(含 padding), 非 URL-safe; 外层 ssr:// 也用标准 base64
+//     (此前 Go 用 URLEncoding 并裁剪 padding, 与 JS Base64.encode 不一致)
+//  3. query 顺序: remarks → obfsparam → protocolparam, 且手动拼接(不排序)
 func (p *URIProducer) encodeShadowsocksR(proxy Proxy) (string, error) {
 	server := GetString(proxy, "server")
 	port := GetInt(proxy, "port")
@@ -662,96 +962,73 @@ func (p *URIProducer) encodeShadowsocksR(proxy Proxy) (string, error) {
 	cipher := GetString(proxy, "cipher")
 	obfs := GetString(proxy, "obfs")
 	password := GetString(proxy, "password")
+	name := GetString(proxy, "name")
 
-	params := url.Values{}
+	std := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+	main := fmt.Sprintf("%s:%d:%s:%s:%s:%s/", server, port, protocol, cipher, obfs, std(password))
+
+	var q strings.Builder
+	q.WriteString("?remarks=" + std(name))
 	if obfsParam := GetString(proxy, "obfs-param"); obfsParam != "" {
-		params.Set("obfsparam", base64.URLEncoding.EncodeToString([]byte(obfsParam)))
+		q.WriteString("&obfsparam=" + std(obfsParam))
 	}
 	if protocolParam := GetString(proxy, "protocol-param"); protocolParam != "" {
-		params.Set("protoparam", base64.URLEncoding.EncodeToString([]byte(protocolParam)))
-	}
-	if name := GetString(proxy, "name"); name != "" {
-		params.Set("remarks", base64.URLEncoding.EncodeToString([]byte(name)))
+		q.WriteString("&protocolparam=" + std(protocolParam))
 	}
 
-	// Format: server:port:protocol:cipher:obfs:password_base64/?params
-	passwordB64 := base64.URLEncoding.EncodeToString([]byte(password))
-	main := fmt.Sprintf("%s:%d:%s:%s:%s:%s", server, port, protocol, cipher, obfs, passwordB64)
-
-	encoded := base64.URLEncoding.EncodeToString([]byte(main + "/?" + params.Encode()))
-	return "ssr://" + strings.TrimRight(encoded, "="), nil
+	return "ssr://" + std(main+q.String()), nil
 }
 
-// encodeHysteria2 encodes Hysteria2 proxy to hysteria2:// or hy2:// URI
+// encodeHysteria2 encodes Hysteria2 proxy to hysteria2:// URI (aligned to JS uri.js case 'hysteria2')
+// 对齐要点: 按 JS 顺序手动拼接 query; sni 取 proxy.sni(经 preprocess 已含 servername);
+// password 用 encodeURIComponent。
+// 有意偏离: JS 不输出 alpn / udp 参数; 此处亦不输出以保持一致。
 func (p *URIProducer) encodeHysteria2(proxy Proxy) (string, error) {
 	server := GetString(proxy, "server")
 	port := GetInt(proxy, "port")
 	password := GetString(proxy, "password")
 	name := GetString(proxy, "name")
 
-	params := url.Values{}
+	var ps []string
 
-	// SNI
-	if sni := GetString(proxy, "servername"); sni != "" {
-		params.Set("sni", sni)
+	// hop-interval, keepalive (JS line 1243-1250) —— 不编码值, 与 JS 一致
+	if hopInterval := GetAnyString(proxy, "hop-interval"); hopInterval != "" {
+		ps = append(ps, "hop-interval="+hopInterval)
 	}
-
-	// Skip cert verify
+	if keepalive := proxy["keepalive"]; keepalive != nil && fmt.Sprintf("%v", keepalive) != "" {
+		ps = append(ps, fmt.Sprintf("keepalive=%v", keepalive))
+	}
+	// skip-cert-verify → insecure=1
 	if GetBool(proxy, "skip-cert-verify") {
-		params.Set("insecure", "1")
+		ps = append(ps, "insecure=1")
 	}
-
-	// ALPN
-	if alpn := GetStringSlice(proxy, "alpn"); len(alpn) > 0 {
-		params.Set("alpn", strings.Join(alpn, ","))
-	}
-
-	// Obfuscation
+	// obfs / obfs-password
 	if obfs := GetString(proxy, "obfs"); obfs != "" {
-		params.Set("obfs", obfs)
+		ps = append(ps, "obfs="+uriEncodeComponent(obfs))
 		if obfsPassword := GetString(proxy, "obfs-password"); obfsPassword != "" {
-			params.Set("obfs-password", obfsPassword)
+			ps = append(ps, "obfs-password="+uriEncodeComponent(obfsPassword))
 		}
 	}
-
-	// hop-interval (frontend line 571-575)
-	if hopInterval := GetString(proxy, "hop-interval"); hopInterval != "" {
-		params.Set("hop-interval", hopInterval)
+	// sni
+	if sni := GetSNI(proxy); sni != "" {
+		ps = append(ps, "sni="+uriEncodeComponent(sni))
 	}
-
-	// keepalive (frontend line 576-578)
-	if keepalive := proxy["keepalive"]; keepalive != nil {
-		params.Set("keepalive", fmt.Sprintf("%v", keepalive))
+	// ports → mport
+	if ports := GetAnyString(proxy, "ports"); ports != "" {
+		ps = append(ps, "mport="+ports)
 	}
-
-	// ports → mport (frontend line 599-601)
-	if ports := GetString(proxy, "ports"); ports != "" {
-		params.Set("mport", ports)
-	}
-
-	// tls-fingerprint → pinSHA256 (frontend line 602-608)
+	// tls-fingerprint → pinSHA256
 	if tlsFingerprint := GetString(proxy, "tls-fingerprint"); tlsFingerprint != "" {
-		params.Set("pinSHA256", tlsFingerprint)
+		ps = append(ps, "pinSHA256="+uriEncodeComponent(tlsFingerprint))
 	}
-
-	// tfo → fastopen (frontend line 609-611)
+	// tfo → fastopen
 	if GetBool(proxy, "tfo") {
-		params.Set("fastopen", "1")
-	}
-
-	// UDP (frontend line 612-615)
-	if udp, ok := proxy["udp"]; ok {
-		if udpBool, ok := udp.(bool); ok {
-			if udpBool {
-				params.Set("udp", "1")
-			} else {
-				params.Set("udp", "0")
-			}
-		}
+		ps = append(ps, "fastopen=1")
 	}
 
 	uri := fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s",
-		url.PathEscape(password), server, port, params.Encode(), url.PathEscape(name))
+		uriEncodeComponent(password), server, port, strings.Join(ps, "&"), uriEncodeComponent(name))
 	return uri, nil
 }
 
@@ -774,16 +1051,16 @@ func (p *URIProducer) encodeHysteria(proxy Proxy) (string, error) {
 			continue
 		}
 
-		// Skip keys starting with underscore
-		if strings.HasPrefix(key, "_") {
-			continue
-		}
+		// 注: JS 仅在 default 分支判断 /^_/ 跳过; _obfs 有专门分支需在此之前处理,
+		// 故不能在循环开头统一跳过下划线前缀(此前 Go 在此 continue, 会误丢 _obfs)。
 
-		// Special mappings (frontend line 626-669)
+		// Special mappings (JS line 1295-1334)
 		switch key {
 		case "alpn":
 			if alpn := GetStringSlice(proxy, "alpn"); len(alpn) > 0 {
-				hysteriaParams = append(hysteriaParams, fmt.Sprintf("alpn=%s", url.QueryEscape(alpn[0])))
+				hysteriaParams = append(hysteriaParams, "alpn="+uriEncodeComponent(alpn[0]))
+			} else if s := uriFirstString(val); s != "" {
+				hysteriaParams = append(hysteriaParams, "alpn="+uriEncodeComponent(s))
 			}
 		case "skip-cert-verify":
 			if GetBool(proxy, "skip-cert-verify") {
@@ -791,10 +1068,9 @@ func (p *URIProducer) encodeHysteria(proxy Proxy) (string, error) {
 			}
 		case "tfo", "fast-open":
 			if GetBool(proxy, key) {
-				// Only add once
 				hasParam := false
-				for _, p := range hysteriaParams {
-					if p == "fastopen=1" {
+				for _, pp := range hysteriaParams {
+					if pp == "fastopen=1" {
 						hasParam = true
 						break
 					}
@@ -817,23 +1093,23 @@ func (p *URIProducer) encodeHysteria(proxy Proxy) (string, error) {
 			hysteriaParams = append(hysteriaParams, fmt.Sprintf("obfsParam=%v", val))
 		case "sni":
 			hysteriaParams = append(hysteriaParams, fmt.Sprintf("peer=%v", val))
-		case "udp":
-			if udpBool, ok := val.(bool); ok {
-				if udpBool {
-					hysteriaParams = append(hysteriaParams, "udp=1")
-				} else {
-					hysteriaParams = append(hysteriaParams, "udp=0")
-				}
-			}
 		default:
-			// Other parameters: replace - with _
-			paramKey := strings.ReplaceAll(key, "-", "_")
-			hysteriaParams = append(hysteriaParams, fmt.Sprintf("%s=%s", paramKey, url.QueryEscape(fmt.Sprintf("%v", val))))
+			// JS: else if (proxy[key] && !/^_/i.test(key))
+			// 仅处理 truthy 且非下划线前缀; key.replace(/-/,'_') 只替换首个连字符。
+			if strings.HasPrefix(key, "_") {
+				continue
+			}
+			if !uriTruthy(val) {
+				continue
+			}
+			paramKey := strings.Replace(key, "-", "_", 1)
+			hysteriaParams = append(hysteriaParams, paramKey+"="+uriEncodeComponent(fmt.Sprintf("%v", val)))
 		}
 	}
 
+	// fragment 用 uriEncodeComponent 对齐 JS encodeURIComponent(proxy.name)。
 	uri := fmt.Sprintf("hysteria://%s:%d?%s#%s",
-		server, port, strings.Join(hysteriaParams, "&"), url.PathEscape(name))
+		server, port, strings.Join(hysteriaParams, "&"), uriEncodeComponent(name))
 	return uri, nil
 }
 

@@ -52,106 +52,54 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 		"2022-blake3-aes-256-gcm": true,
 	}
 
-	supportedVMessCiphers := map[string]bool{
-		"auto":              true,
-		"aes-128-gcm":       true,
-		"chacha20-poly1305": true,
-		"none":              true,
-	}
-
 	var result []Proxy
 	for _, proxy := range proxies {
 		proxyType := p.helper.GetProxyType(proxy)
+		network := GetString(proxy, "network")
 
-		// Filter unsupported types
+		// 镜像 JS: 当 include-unsupported-proxy 开启时, 所有节点直接放行, 不做任何过滤.
+		// (JS stash.js 第 19 行: `if (opts['include-unsupported-proxy']) return true;`)
 		shouldSkip := false
-
-		// Check supported types
-		if !p.isSupportedType(proxyType) {
-			shouldSkip = true
-			logger.Info("[Stash] 跳过不支持的协议类型", "name", GetString(proxy, "name"), "type", proxyType)
-		}
-
-		// Check SS cipher
-		if proxyType == "ss" {
-			cipher := GetString(proxy, "cipher")
-			if !supportedSSCiphers[cipher] {
-				// 客户端兼容模式开启时跳过不支持的cipher节点
-				if opts.ClientCompatibilityMode {
-					shouldSkip = true
-					logger.Info("[Stash] 跳过不支持的SS加密方式", "name", GetString(proxy, "name"), "cipher", cipher)
-				}
-			}
-		}
-
-		// Check Snell version
-		if proxyType == "snell" && GetInt(proxy, "version") >= 4 {
-			shouldSkip = true
-			logger.Info("[Stash] 跳过Snell v4+节点", "name", GetString(proxy, "name"), "version", GetInt(proxy, "version"))
-		}
-
-		// Check VLESS reality
-		if proxyType == "vless" && IsPresent(proxy, "reality-opts") {
-			flow := GetString(proxy, "flow")
-			if flow != "xtls-rprx-vision" {
-				// 客户端兼容模式开启时跳过没有流控算法的节点
-				if opts.ClientCompatibilityMode {
-					shouldSkip = true
-					logger.Info("[Stash] 跳过VLESS reality节点(缺少xtls-rprx-vision流控)", "name", GetString(proxy, "name"), "flow", flow)
-				}
-			}
-		}
-
-		// Check underlying-proxy / dialer-proxy
-		if IsPresent(proxy, "underlying-proxy") || IsPresent(proxy, "dialer-proxy") {
-			// 客户端兼容模式开启时跳过链式代理节点
-			if opts.ClientCompatibilityMode {
+		if !opts.IncludeUnsupportedProxy {
+			switch {
+			// 不支持的协议类型 / 不支持的 SS cipher / snell v4+
+			// (JS stash.js 第 20-59 行, 合并为一个判断分支)
+			case !p.isSupportedType(proxyType),
+				proxyType == "ss" && !supportedSSCiphers[GetString(proxy, "cipher")],
+				proxyType == "snell" && GetInt(proxy, "version") >= 4:
 				shouldSkip = true
-				logger.Info("[Stash] 跳过链式代理节点", "name", GetString(proxy, "name"))
-			}
-		}
+				logger.Info("[Stash] 跳过不支持的节点(类型/cipher/snell版本)",
+					"name", GetString(proxy, "name"), "type", proxyType)
 
-		// Check anytls: requires include-unsupported-proxy
-		if proxyType == "anytls" && !opts.IncludeUnsupportedProxy {
-			shouldSkip = true
-			logger.Info("[Stash] 跳过anytls节点(需要启用include-unsupported-proxy)", "name", GetString(proxy, "name"))
-		}
-
-		// Check anytls network
-		if proxyType == "anytls" {
-			network := GetString(proxy, "network")
-			if network != "" && network != "tcp" {
+			// SS v2ray-plugin 仅支持 websocket 模式 (JS 第 62-64 行)
+			case !stashSupportsSSV2rayPluginMode(proxy, "websocket"):
 				shouldSkip = true
-				logger.Info("[Stash] 跳过anytls节点(不支持的network)", "name", GetString(proxy, "name"), "network", network)
-			}
-			if network == "tcp" && IsPresent(proxy, "reality-opts") {
+				logger.Info("[Stash] 跳过SS v2ray-plugin非websocket模式节点", "name", GetString(proxy, "name"))
+
+			// vless + reality-opts: 仅当存在 network 且 network != tcp 时跳过 (JS 第 66-72 行)
+			case proxyType == "vless" && IsPresent(proxy, "reality-opts") && network != "" && network != "tcp":
 				shouldSkip = true
-				logger.Info("[Stash] 跳过anytls节点(tcp+reality不支持)", "name", GetString(proxy, "name"))
-			}
-		}
+				logger.Info("[Stash] 跳过VLESS reality节点(network非tcp)", "name", GetString(proxy, "name"), "network", network)
 
-		// Check xhttp network
-		if GetString(proxy, "network") == "xhttp" {
-			shouldSkip = true
-			logger.Info("[Stash] 跳过xhttp网络节点", "name", GetString(proxy, "name"))
-		}
-
-		// Check VLESS encryption
-		if proxyType == "vless" {
-			encryption := GetString(proxy, "encryption")
-			if encryption != "" && encryption != "none" {
+			// anytls: 存在 network 时, network 非 tcp, 或 tcp+reality, 均跳过 (JS 第 73-80 行)
+			case proxyType == "anytls" && network != "" && (network != "tcp" || IsPresent(proxy, "reality-opts")):
 				shouldSkip = true
-				logger.Info("[Stash] 跳过VLESS节点(encryption必须为none)", "name", GetString(proxy, "name"), "encryption", encryption)
-			}
-		}
+				logger.Info("[Stash] 跳过anytls节点(network/reality不支持)", "name", GetString(proxy, "name"), "network", network)
 
-		// Check ws + v2ray-http-upgrade
-		if GetString(proxy, "network") == "ws" {
-			if wsOpts := GetMap(proxy, "ws-opts"); wsOpts != nil {
-				if GetBool(wsOpts, "v2ray-http-upgrade") {
-					shouldSkip = true
-					logger.Info("[Stash] 跳过ws+v2ray-http-upgrade节点", "name", GetString(proxy, "name"))
-				}
+			// xhttp 网络不支持 (JS 第 81-82 行)
+			case network == "xhttp":
+				shouldSkip = true
+				logger.Info("[Stash] 跳过xhttp网络节点", "name", GetString(proxy, "name"))
+
+			// vless encryption 必须为空或 none (JS 第 83-88 行)
+			case proxyType == "vless" && GetString(proxy, "encryption") != "" && GetString(proxy, "encryption") != "none":
+				shouldSkip = true
+				logger.Info("[Stash] 跳过VLESS节点(encryption必须为none)", "name", GetString(proxy, "name"), "encryption", GetString(proxy, "encryption"))
+
+			// ws + v2ray-http-upgrade 不支持 (JS 第 89-93 行)
+			case network == "ws" && GetBool(GetMap(proxy, "ws-opts"), "v2ray-http-upgrade"):
+				shouldSkip = true
+				logger.Info("[Stash] 跳过ws+v2ray-http-upgrade节点", "name", GetString(proxy, "name"))
 			}
 		}
 
@@ -177,13 +125,10 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 				delete(transformed, "sni")
 			}
 
-			// Cipher validation
-			if IsPresent(transformed, "cipher") {
-				cipher := GetString(transformed, "cipher")
-				if !supportedVMessCiphers[cipher] {
-					transformed["cipher"] = "auto"
-				}
-			}
+			// Cipher 规范化 (镜像 JS normalizeClashVmessSecurity):
+			// 小写去空格, chacha20-ietf-poly1305 归一为 chacha20-poly1305,
+			// 仅保留 auto/aes-128-gcm/chacha20-poly1305/none, 其余回退 auto.
+			transformed["cipher"] = stashNormalizeVmessCipher(GetString(transformed, "cipher"))
 		}
 
 		// TUIC transformations
@@ -350,7 +295,7 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 		}
 
 		// Handle HTTP network options for VMess/VLESS
-		network := GetString(transformed, "network")
+		network = GetString(transformed, "network")
 		if (proxyType == "vmess" || proxyType == "vless") && network == "http" {
 			if httpOpts := GetMap(transformed, "http-opts"); httpOpts != nil {
 				// Ensure path is array
@@ -371,53 +316,59 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 			}
 		}
 
-		// Handle H2 network options
+		// Handle H2 network options (镜像 JS stash.js 第 249-282 行)
 		if (proxyType == "vmess" || proxyType == "vless") && network == "h2" {
 			if h2Opts := GetMap(transformed, "h2-opts"); h2Opts != nil {
-				// Ensure path is string (take first element if array)
+				// path: 数组取第一个元素 (JS 第 253-259 行)
 				if IsPresent(transformed, "h2-opts", "path") {
 					if pathSlice, ok := h2Opts["path"].([]interface{}); ok && len(pathSlice) > 0 {
 						h2Opts["path"] = pathSlice[0]
 					}
 				}
 
-				// Ensure host is array
-				if headers := GetMap(h2Opts, "headers"); headers != nil {
-					if IsPresent(transformed, "h2-opts", "headers", "Host") {
-						if host, ok := headers["Host"].(string); ok {
-							headers["host"] = []string{host}
-						}
+				// host: 来源优先级 h2-opts.host -> headers.host -> headers.Host,
+				// 统一规范化到顶层 h2-opts.host 为数组 (JS 第 260-272 行)
+				headers := GetMap(h2Opts, "headers")
+				var host interface{}
+				if IsPresent(transformed, "h2-opts", "host") {
+					host = h2Opts["host"]
+				} else if headers != nil && IsPresent(headers, "host") {
+					host = headers["host"]
+				} else if headers != nil && IsPresent(headers, "Host") {
+					host = headers["Host"]
+				}
+				if IsPresent(transformed, "h2-opts", "host") ||
+					(headers != nil && (IsPresent(headers, "host") || IsPresent(headers, "Host"))) {
+					if _, ok := host.([]interface{}); ok {
+						h2Opts["host"] = host
+					} else {
+						h2Opts["host"] = []interface{}{host}
+					}
+				}
+
+				// 清理 headers 中的 host/Host, headers 为空则删除 (JS 第 273-281 行)
+				if headers != nil {
+					delete(headers, "host")
+					delete(headers, "Host")
+					if len(headers) == 0 {
+						delete(h2Opts, "headers")
 					}
 				}
 			}
 		}
 
-		// Handle WebSocket early data
+		// Handle WebSocket early data (镜像 JS 第 283-290 行 + normalizeWebSocketEarlyDataPath)
 		if network == "ws" {
 			networkOpts := GetMap(transformed, "ws-opts")
-			if networkOpts != nil {
-				if path := GetString(networkOpts, "path"); path != "" {
-					re := regexp.MustCompile(`^(.*?)(?:\?ed=(\d+))?$`)
-					matches := re.FindStringSubmatch(path)
-					if len(matches) > 1 {
-						cleanPath := matches[1]
-						networkOpts["path"] = cleanPath
-
-						if len(matches) > 2 && matches[2] != "" {
-							networkOpts["early-data-header-name"] = "Sec-WebSocket-Protocol"
-							edValue := 0
-							fmt.Sscanf(matches[2], "%d", &edValue)
-							networkOpts["max-early-data"] = edValue
-						}
-					}
-				} else {
-					networkOpts["path"] = "/"
-				}
-			} else {
-				transformed["ws-opts"] = map[string]interface{}{
-					"path": "/",
-				}
+			if networkOpts == nil {
+				networkOpts = map[string]interface{}{}
+				transformed["ws-opts"] = networkOpts
 			}
+			if GetString(networkOpts, "path") == "" {
+				networkOpts["path"] = "/"
+			}
+			// 注: ws+v2ray-http-upgrade 节点已在过滤阶段被跳过, 此处仅处理 ed 查询参数.
+			stashNormalizeWSEarlyDataPath(networkOpts)
 		}
 
 		// Handle plugin-opts TLS
@@ -438,6 +389,12 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 		}
 		delete(transformed, "tls-fingerprint")
 
+		// underlying-proxy -> dialer-proxy (JS stash.js 第 318-321 行)
+		if IsPresent(transformed, "underlying-proxy") {
+			transformed["dialer-proxy"] = transformed["underlying-proxy"]
+		}
+		delete(transformed, "underlying-proxy")
+
 		// Remove non-boolean tls
 		if IsPresent(transformed, "tls") {
 			if _, ok := transformed["tls"].(bool); !ok {
@@ -457,9 +414,10 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 			delete(transformed, "test-timeout")
 		}
 
-		// Clean up fields
+		// Clean up fields (镜像 JS 第 336-342 行, 含 ip-cidr/ipv6-cidr)
 		p.helper.RemoveProxyFields(transformed,
-			"subName", "collectionName", "id", "resolved", "no-resolve")
+			"subName", "collectionName", "id", "resolved", "no-resolve",
+			"ip-cidr", "ipv6-cidr")
 
 		// Remove null and underscore-prefixed fields for non-internal output
 		if outputType != "internal" {
@@ -914,6 +872,7 @@ func (p *StashProducer) isSupportedType(proxyType string) bool {
 		"ss", "ssr", "vmess", "socks5", "http", "snell",
 		"trojan", "tuic", "vless", "wireguard",
 		"hysteria", "hysteria2", "ssh", "juicity", "anytls",
+		"tailscale", "trusttunnel",
 	}
 
 	for _, t := range supportedTypes {
@@ -927,6 +886,7 @@ func (p *StashProducer) isSupportedType(proxyType string) bool {
 func (p *StashProducer) shouldDeleteTLS(proxyType string) bool {
 	deleteTLSTypes := []string{
 		"trojan", "tuic", "hysteria", "hysteria2", "juicity", "anytls",
+		"trusttunnel", "naive",
 	}
 
 	for _, t := range deleteTLSTypes {
@@ -935,4 +895,102 @@ func (p *StashProducer) shouldDeleteTLS(proxyType string) bool {
 		}
 	}
 	return false
+}
+
+// stashSupportsSSV2rayPluginMode 镜像 JS supportsShadowsocksV2rayPluginMode:
+// 仅当节点是 ss 且 plugin == v2ray-plugin 时才校验 mode; 否则一律支持.
+// mode 取自 plugin-opts.mode, 去空格小写后须命中 supportedModes 之一.
+func stashSupportsSSV2rayPluginMode(proxy Proxy, supportedModes ...string) bool {
+	if GetString(proxy, "type") != "ss" || GetString(proxy, "plugin") != "v2ray-plugin" {
+		return true
+	}
+	pluginOpts := GetMap(proxy, "plugin-opts")
+	if pluginOpts == nil {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(GetString(pluginOpts, "mode")))
+	for _, m := range supportedModes {
+		if m == mode {
+			return true
+		}
+	}
+	return false
+}
+
+// stashExtractPathQueryParam 镜像 JS extractPathQueryParam:
+// 从 path 中移除名为 paramName 的查询参数, 返回剩余 path 与该参数首个非空值.
+// 不做 URL 解码(节点 path 通常已是字面值), 仅按 ? 与 & 分割.
+func stashExtractPathQueryParam(rawPath, paramName string) (string, string) {
+	qi := strings.Index(rawPath, "?")
+	if qi == -1 {
+		return rawPath, ""
+	}
+	basePath := rawPath[:qi]
+	query := rawPath[qi+1:]
+	var kept []string
+	value := ""
+	for _, part := range strings.Split(query, "&") {
+		if part == "" {
+			continue
+		}
+		key := part
+		val := ""
+		if eq := strings.Index(part, "="); eq != -1 {
+			key = part[:eq]
+			val = part[eq+1:]
+		}
+		if key == paramName {
+			if value == "" && val != "" {
+				value = val
+			}
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if len(kept) > 0 {
+		return basePath + "?" + strings.Join(kept, "&"), value
+	}
+	return basePath, value
+}
+
+// stashNormalizeWSEarlyDataPath 镜像 JS normalizeWebSocketEarlyDataPath 的非 v2ray-http-upgrade 分支:
+// 提取 path 中的整数 ed 参数, 设置 early-data-header-name 与 max-early-data.
+func stashNormalizeWSEarlyDataPath(wsOpts map[string]interface{}) {
+	if wsOpts == nil {
+		return
+	}
+	rawPath := GetString(wsOpts, "path")
+	cleanPath, edStr := stashExtractPathQueryParam(rawPath, "ed")
+	// ed 必须是纯数字才视为有效 (镜像 JS parseSafeIntegerValue)
+	if edStr == "" || !regexp.MustCompile(`^\d+$`).MatchString(edStr) {
+		return
+	}
+	maxEarlyData := 0
+	fmt.Sscanf(edStr, "%d", &maxEarlyData)
+	wsOpts["path"] = cleanPath
+	if !IsPresent(wsOpts, "early-data-header-name") {
+		wsOpts["early-data-header-name"] = "Sec-WebSocket-Protocol"
+	}
+	if !IsPresent(wsOpts, "max-early-data") {
+		wsOpts["max-early-data"] = maxEarlyData
+	}
+}
+
+// stashNormalizeVmessCipher 镜像 JS normalizeClashVmessSecurity:
+// 去空格小写, 别名 chacha20-ietf-poly1305 归一为 chacha20-poly1305,
+// 支持集 auto/aes-128-gcm/chacha20-poly1305/none, 空或不支持回退 auto.
+func stashNormalizeVmessCipher(cipher string) string {
+	normalized := strings.ToLower(strings.TrimSpace(cipher))
+	if normalized == "" {
+		return "auto"
+	}
+	if normalized == "chacha20-ietf-poly1305" {
+		normalized = "chacha20-poly1305"
+	}
+	switch normalized {
+	case "auto", "aes-128-gcm", "chacha20-poly1305", "none":
+		return normalized
+	default:
+		return "auto"
+	}
 }

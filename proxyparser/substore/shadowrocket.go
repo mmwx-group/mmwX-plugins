@@ -2,10 +2,75 @@ package substore
 
 import (
 	"encoding/json"
-	"regexp"
-	"strconv"
 	"strings"
 )
+
+// srVmessSecurityCommon 对齐 JS vmess-security.js VMESS_SECURITY_COMMON_VALUES
+var srVmessSecurityCommon = map[string]bool{
+	"auto":              true,
+	"none":              true,
+	"zero":              true,
+	"aes-128-gcm":       true,
+	"chacha20-poly1305": true,
+}
+
+// srVmessSecurityAliases 对齐 JS VMESS_SECURITY_ALIASES
+var srVmessSecurityAliases = map[string]string{
+	"chacha20-ietf-poly1305": "chacha20-poly1305",
+}
+
+// srNormalizeVmessSecurity 对齐 JS normalizeVmessSecurity(security)(默认 COMMON_VALUES, acceptAliases=true, fallback="auto")。
+// 无条件归一化:空值/不支持值均回退到 "auto"。
+func srNormalizeVmessSecurity(security string) string {
+	normalized := strings.ToLower(strings.TrimSpace(security))
+	if normalized == "" {
+		return "auto"
+	}
+	if srVmessSecurityCommon[normalized] {
+		if canonical, ok := srVmessSecurityAliases[normalized]; ok {
+			return canonical
+		}
+		return normalized
+	}
+	// 别名归一后再次匹配受支持集合
+	if canonical, ok := srVmessSecurityAliases[normalized]; ok {
+		if srVmessSecurityCommon[canonical] {
+			return canonical
+		}
+	}
+	return "auto"
+}
+
+// srSupportsV2rayPluginMode 对齐 JS supportsShadowsocksV2rayPluginMode:
+// 仅当 ss + plugin=v2ray-plugin 时校验 plugin-opts.mode 是否在受支持列表内;其它情况一律 true。
+func srSupportsV2rayPluginMode(proxy Proxy, supportedModes map[string]bool) bool {
+	if GetString(proxy, "type") != "ss" || GetString(proxy, "plugin") != "v2ray-plugin" {
+		return true
+	}
+	mode := ""
+	if pluginOpts := GetMap(proxy, "plugin-opts"); pluginOpts != nil {
+		mode = strings.ToLower(strings.TrimSpace(GetString(pluginOpts, "mode")))
+	}
+	return supportedModes[mode]
+}
+
+// srIsShadowsocksOverTls 对齐 JS isShadowsocksOverTls:
+// ss + tls===true + 无 plugin + (无 network 或 network=tcp)。
+func srIsShadowsocksOverTls(proxy Proxy) bool {
+	if GetString(proxy, "type") != "ss" {
+		return false
+	}
+	if tls, ok := proxy["tls"].(bool); !ok || !tls {
+		return false
+	}
+	if IsPresent(proxy, "plugin") {
+		return false
+	}
+	if !IsPresent(proxy, "network") {
+		return true
+	}
+	return strings.ToLower(strings.TrimSpace(GetString(proxy, "network"))) == "tcp"
+}
 
 // ShadowrocketProducer implements Shadowrocket format converter
 type ShadowrocketProducer struct {
@@ -32,9 +97,9 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 		opts = &ProduceOptions{}
 	}
 
-	supportedVMessCiphers := map[string]bool{
-		"auto": true, "none": true, "zero": true,
-		"aes-128-gcm": true, "chacha20-poly1305": true,
+	// 对齐 JS supportsShadowsocksV2rayPluginMode 的受支持 v2ray-plugin mode 列表
+	ssV2rayPluginModes := map[string]bool{
+		"websocket": true, "quic": true, "http2": true, "mkcp": true, "grpc": true,
 	}
 
 	// Filter and transform proxies
@@ -42,38 +107,26 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 	for _, proxy := range proxies {
 		proxyType := p.helper.GetProxyType(proxy)
 
-		// Filter unsupported types
+		// Filter unsupported types(对齐 JS shadowrocket.js filter)
 		if !opts.IncludeUnsupportedProxy {
-			// Snell v4+
-			if proxyType == "snell" && GetInt(proxy, "version") >= 4 {
+			// ss + v2ray-plugin 但 mode 不受支持
+			if !srSupportsV2rayPluginMode(proxy, ssV2rayPluginModes) {
 				continue
 			}
-			// Unsupported types
-			if proxyType == "mieru" || proxyType == "sudoku" || proxyType == "naive" {
-				continue
-			}
-			// 先屏蔽 vless enc, 现在支持的有限 20260414, 后续再打开
-			// 支持 vless enc 20260508
-			// if proxyType == "vless" {
-			// 	encryption := GetString(proxy, "encryption")
-			// 	if encryption != "" && encryption != "none" {
-			// 		continue
-			// 	}
-			// }
-			// anytls with unsupported network
-			if proxyType == "anytls" {
-				network := GetString(proxy, "network")
-				if network != "" && network != "tcp" {
-					continue
-				}
-				if network == "tcp" && IsPresent(proxy, "reality-opts") {
+			// snell 仅支持 version 1..5
+			if proxyType == "snell" {
+				version := GetInt(proxy, "version")
+				if version < 1 || version > 5 {
 					continue
 				}
 			}
-			// xhttp is now support
-			// if GetString(proxy, "network") == "xhttp" {
-			// continue
-			// }
+			// 明确不支持的类型
+			if proxyType == "tailscale" || proxyType == "sudoku" || proxyType == "naive" ||
+				proxyType == "openvpn" || proxyType == "gost-relay" {
+				continue
+			}
+			// JS: network==='xhttp' 仅告警保留(VLESS XHTTP 结构复杂, Shadowrocket 可能无法完全兼容)
+			// 这里不再额外过滤,落到下方 xhttp/splithttp 纠正性转换处理。
 		}
 
 		transformed := p.helper.CloneProxy(proxy)
@@ -94,13 +147,10 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 				delete(transformed, "sni")
 			}
 
-			// Cipher validation
-			if IsPresent(transformed, "cipher") {
-				cipher := GetString(transformed, "cipher")
-				if !supportedVMessCiphers[cipher] {
-					transformed["cipher"] = "auto"
-				}
-			}
+			// Cipher 归一化
+			// JS: proxy.cipher = normalizeVmessSecurity(proxy.cipher) —— 无条件赋值,
+			// 即使 cipher 缺失也会归一化为 fallback "auto",并处理 chacha20-ietf-poly1305 别名。
+			transformed["cipher"] = srNormalizeVmessSecurity(GetString(transformed, "cipher"))
 		}
 
 		// TUIC transformations
@@ -181,6 +231,20 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 				transformed["preshared-key"] = GetString(transformed, "pre-shared-key")
 			}
 			transformed["pre-shared-key"] = GetString(transformed, "preshared-key")
+
+			// JS: proxy.ip / proxy.ipv6 = getWireGuardAddressWithCIDR(...)。
+			// 纠正性偏离:Go helper 对无效地址返回空串,而 JS 返回 undefined(随后被 null 清理删除)。
+			// 这里地址无效时置为 nil,使下方 null 清理一致删除该键。
+			if ip := getWireGuardAddressWithCIDR(transformed, "ipv4"); ip != "" {
+				transformed["ip"] = ip
+			} else {
+				transformed["ip"] = nil
+			}
+			if ipv6 := getWireGuardAddressWithCIDR(transformed, "ipv6"); ipv6 != "" {
+				transformed["ipv6"] = ipv6
+			} else {
+				transformed["ipv6"] = nil
+			}
 		}
 
 		// Snell transformations
@@ -213,6 +277,13 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 				delete(transformed, "shadow-tls-password")
 				delete(transformed, "shadow-tls-sni")
 				delete(transformed, "shadow-tls-version")
+			}
+
+			// Shadowsocks over TLS: sni -> servername(JS 不删除 sni,无明确规范)
+			if srIsShadowsocksOverTls(transformed) {
+				if IsPresent(transformed, "sni") {
+					transformed["servername"] = GetString(transformed, "sni")
+				}
 			}
 		}
 
@@ -279,65 +350,77 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 			}
 		}
 
-		// Handle H2 network options
+		// Handle H2 network options(对齐 JS 188-220)
 		if (proxyType == "vmess" || proxyType == "vless") && network == "h2" {
 			if h2Opts := GetMap(transformed, "h2-opts"); h2Opts != nil {
-				// Ensure path is string (take first element if array)
+				// path 为数组时取首元素(JS: Array.isArray(path) => path[0])
 				if IsPresent(transformed, "h2-opts", "path") {
 					if pathSlice, ok := h2Opts["path"].([]interface{}); ok && len(pathSlice) > 0 {
 						h2Opts["path"] = pathSlice[0]
 					}
 				}
 
-				// Ensure host is array
-				if headers := GetMap(h2Opts, "headers"); headers != nil {
-					if IsPresent(transformed, "h2-opts", "headers", "Host") {
-						if host, ok := headers["Host"].(string); ok {
-							headers["host"] = []string{host}
-						}
+				// host 优先级: h2-opts.host ?? headers.host ?? headers.Host
+				headers := GetMap(h2Opts, "headers")
+				hasHostKey := IsPresent(transformed, "h2-opts", "host") ||
+					IsPresent(transformed, "h2-opts", "headers", "host") ||
+					IsPresent(transformed, "h2-opts", "headers", "Host")
+				if hasHostKey {
+					var hostVal interface{}
+					if IsPresent(transformed, "h2-opts", "host") {
+						hostVal = h2Opts["host"]
+					} else if headers != nil && IsPresent(headers, "host") {
+						hostVal = headers["host"]
+					} else if headers != nil && IsPresent(headers, "Host") {
+						hostVal = headers["Host"]
+					}
+					// 写入 h2-opts.host,确保为数组(JS: Array.isArray(host) ? host : [host])
+					if _, ok := hostVal.([]interface{}); ok {
+						h2Opts["host"] = hostVal
+					} else if hostSlice, ok := hostVal.([]string); ok {
+						h2Opts["host"] = hostSlice
+					} else {
+						h2Opts["host"] = []interface{}{hostVal}
+					}
+				}
+
+				// 删除 headers.host / headers.Host,若 headers 清空则删除 headers
+				if headers != nil {
+					delete(headers, "host")
+					delete(headers, "Host")
+					if len(headers) == 0 {
+						delete(h2Opts, "headers")
 					}
 				}
 			}
 		}
 
-		// Handle WS network early data
+		// Handle WS network early data(对齐 JS 221-228)
 		if network == "ws" {
 			wsOpts := GetMap(transformed, "ws-opts")
 			if wsOpts == nil {
 				wsOpts = make(map[string]interface{})
 				transformed["ws-opts"] = wsOpts
 			}
-
-			path := GetString(wsOpts, "path")
-			if path != "" {
-				// Extract early data from path
-				re := regexp.MustCompile(`^(.*?)(?:\?ed=(\d+))?$`)
-				matches := re.FindStringSubmatch(path)
-				if len(matches) > 0 {
-					wsOpts["path"] = matches[1]
-					if len(matches) > 2 && matches[2] != "" {
-						wsOpts["early-data-header-name"] = "Sec-WebSocket-Protocol"
-						ed, _ := strconv.Atoi(matches[2])
-						wsOpts["max-early-data"] = ed
-					}
-				}
-			} else {
+			if GetString(wsOpts, "path") == "" {
 				wsOpts["path"] = "/"
 			}
+			normalizeWsEarlyDataPath(wsOpts)
 		}
 
 		// Handle plugin-opts TLS
+		// JS: pluginOpts['skip-cert-verify'] = pluginOpts['skip-cert-verify'] || proxy['skip-cert-verify']
 		if pluginOpts := GetMap(transformed, "plugin-opts"); pluginOpts != nil {
 			if GetBool(pluginOpts, "tls") && IsPresent(transformed, "skip-cert-verify") {
-				pluginOpts["skip-cert-verify"] = GetBool(transformed, "skip-cert-verify")
+				pluginOpts["skip-cert-verify"] = GetBool(pluginOpts, "skip-cert-verify") || GetBool(transformed, "skip-cert-verify")
 			}
 		}
 
-		// Delete tls for certain proxy types
+		// Delete tls for certain proxy types(对齐 JS 237-250)
 		deleteTLSTypes := map[string]bool{
 			"trojan": true, "tuic": true, "hysteria": true,
 			"hysteria2": true, "juicity": true, "anytls": true,
-			"naive": true,
+			"trusttunnel": true, "naive": true,
 		}
 		if deleteTLSTypes[proxyType] {
 			delete(transformed, "tls")
@@ -362,15 +445,22 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 			}
 		}
 
-		// Clean up fields
+		// Clean up fields(对齐 JS 265-271)
 		p.helper.RemoveProxyFields(transformed,
-			"subName", "collectionName", "id", "resolved", "no-resolve")
+			"subName", "collectionName", "id", "resolved", "no-resolve",
+			"ip-cidr", "ipv6-cidr")
 
 		// Remove null and underscore-prefixed fields for non-internal output
 		if outputType != "internal" {
 			for key := range transformed {
 				if transformed[key] == nil || strings.HasPrefix(key, "_") {
 					delete(transformed, key)
+				}
+			}
+			// JS: deleteHttpUpgradeEarlyDataMetadata(proxy[`${network}-opts`]) —— 删除 _v2ray-http-upgrade-ed
+			if network != "" {
+				if netOpts := GetMap(transformed, network+"-opts"); netOpts != nil {
+					delete(netOpts, "_v2ray-http-upgrade-ed")
 				}
 			}
 		}

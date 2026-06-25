@@ -35,21 +35,12 @@ func (p *SurgeMacProducer) Produce(proxies []Proxy, outputType string, opts *Pro
 
 	var result []string
 	for _, proxy := range proxies {
+		// 对齐 JS: ProduceOne 内部已处理 external / mihomo 直连与 mihomo 回退，
+		// 这里出错即跳过该节点（JS 中 produce 抛错时由上层过滤）。
 		line, err := p.ProduceOne(proxy, outputType, opts)
-		if err != nil {
-			if opts.IncludeUnsupportedProxy {
-				// Try to produce using mihomo fallback if enabled
-				if opts.UseMihomoExternal {
-					line, err = p.produceMihomo(proxy, outputType, opts)
-					if err != nil {
-						continue
-					}
-				} else {
-					continue
-				}
-			} else {
-				continue
-			}
+		if err != nil || line == "" {
+			// 对齐 JS: 出错或返回空字符串（如 mihomo 直连失败、snell v6 obfs 不支持）的节点被过滤。
+			continue
 		}
 		result = append(result, line)
 	}
@@ -73,6 +64,15 @@ func (p *SurgeMacProducer) ProduceOne(proxy Proxy, outputType string, opts *Prod
 	case "external":
 		return p.produceExternal(proxy)
 	default:
+		// 对齐 JS: if (opts.mihomoExternal || proxy._mihomoExternal) 直接走 mihomo。
+		// ProduceOptions 无 mihomoExternal 字段（types.go 为共享类型，不在本任务范围内改动），
+		// 因此仅镜像 proxy._mihomoExternal 这一路径。
+		if surgemacIsMihomoExternal(proxy) {
+			if line, err := p.produceMihomo(proxy, outputType, opts); err == nil {
+				return line, nil
+			}
+			return "", nil
+		}
 		// Try to use the standard Surge producer
 		result, err := p.surgeProducer.ProduceOne(proxy, outputType, opts)
 		if err != nil {
@@ -91,13 +91,17 @@ func (p *SurgeMacProducer) produceExternal(proxy Proxy) (string, error) {
 	result := &Result{Proxy: proxy}
 
 	exec := GetString(proxy, "exec")
+
+	// 对齐 JS: if (!proxy.exec || !proxy['local-port']) 抛错。
+	// 纠正性偏离：原 Go 用 GetInt 兜底会把缺失/0 的 local-port 变成 "0" 从而绕过校验，
+	// 这里改用 IsPresent 严格判断 exec 与 local-port 是否存在，避免生成无效 external 行。
+	if exec == "" || !IsPresent(proxy, "exec") || !IsPresent(proxy, "local-port") {
+		return "", fmt.Errorf("external: exec and local-port are required")
+	}
+
 	localPort := GetString(proxy, "local-port")
 	if localPort == "" {
 		localPort = fmt.Sprintf("%d", GetInt(proxy, "local-port"))
-	}
-
-	if exec == "" || localPort == "" {
-		return "", fmt.Errorf("external: exec and local-port are required")
 	}
 
 	result.Append(fmt.Sprintf(`%s=external,exec="%s",local-port=%s`,
@@ -121,6 +125,10 @@ func (p *SurgeMacProducer) produceExternal(proxy Proxy) (string, error) {
 
 	// no-error-alert
 	result.AppendIfPresent(`,no-error-alert=%v`, "no-error-alert")
+
+	// udp
+	// 对齐 JS surgemac external: result.appendIfPresent(`,udp-relay=${proxy.udp}`, 'udp')
+	result.AppendIfPresent(`,udp-relay=%v`, "udp")
 
 	// tfo
 	if IsPresent(proxy, "tfo") {
@@ -210,10 +218,10 @@ func (p *SurgeMacProducer) produceMihomo(proxy Proxy, _ string, opts *ProduceOpt
 		"ipv6":       ipv6,
 		"mode":       "global",
 		"dns": map[string]interface{}{
-			"enable":              true,
-			"ipv6":                ipv6,
-			"default-nameserver":  defaultNameserver,
-			"nameserver":          nameserver,
+			"enable":             true,
+			"ipv6":               ipv6,
+			"default-nameserver": defaultNameserver,
+			"nameserver":         nameserver,
 		},
 		"proxies": []interface{}{clashProxy},
 		"proxy-groups": []interface{}{
@@ -239,9 +247,12 @@ func (p *SurgeMacProducer) produceMihomo(proxy Proxy, _ string, opts *ProduceOpt
 	}
 
 	// Build external proxy
+	// 对齐 JS surgemac mihomo(): external_proxy 携带 udp: true，
+	// 由 external() 输出为 ,udp-relay=true
 	externalProxy := Proxy{
 		"name":       p.helper.GetProxyName(proxy),
 		"type":       "external",
+		"udp":        true,
 		"exec":       exec,
 		"local-port": localPort,
 		"args":       []string{"-config", configBase64},
@@ -263,4 +274,12 @@ func (p *SurgeMacProducer) produceMihomo(proxy Proxy, _ string, opts *ProduceOpt
 	}
 
 	return p.produceExternal(externalProxy)
+}
+
+// surgemacIsMihomoExternal 判断 proxy 是否标记了 _mihomoExternal（对齐 JS proxy._mihomoExternal）。
+func surgemacIsMihomoExternal(proxy Proxy) bool {
+	if !IsPresent(proxy, "_mihomoExternal") {
+		return false
+	}
+	return GetBool(proxy, "_mihomoExternal")
 }
