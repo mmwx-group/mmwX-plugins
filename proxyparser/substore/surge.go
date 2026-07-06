@@ -124,17 +124,15 @@ func (p *SurgeProducer) ProduceOne(proxy Proxy, outputType string, opts *Produce
 		}
 		return "", fmt.Errorf("platform Surge does not support proxy type: %s", proxyType)
 	case "anytls":
-		if includeUnsupported {
-			network := GetString(proxy, "network")
-			if network != "" && network != "tcp" {
-				return "", fmt.Errorf("platform Surge does not support proxy type %s with network or reality", proxyType)
-			}
-			if network == "tcp" && IsPresent(proxy, "reality-opts") {
-				return "", fmt.Errorf("platform Surge does not support proxy type %s with network or reality", proxyType)
-			}
-			return p.anytls(proxy)
+		// anytls-tcp 是 Surge 原生支持(5.9+),默认输出;只有 reality / 非 tcp network 才是 Surge 真不支持的。
+		network := GetString(proxy, "network")
+		if network != "" && network != "tcp" {
+			return "", fmt.Errorf("platform Surge does not support proxy type %s with network %s", proxyType, network)
 		}
-		return "", fmt.Errorf("platform Surge does not support proxy type: %s", proxyType)
+		if IsPresent(proxy, "reality-opts") {
+			return "", fmt.Errorf("platform Surge does not support proxy type %s with reality", proxyType)
+		}
+		return p.anytls(proxy)
 	default:
 		return "", fmt.Errorf("platform Surge does not support proxy type: %s", proxyType)
 	}
