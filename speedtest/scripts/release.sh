@@ -21,7 +21,7 @@ case "$BUMP" in
   *) echo "[ERROR] 未知 bump 类型: $BUMP (patch|minor|major)"; exit 1 ;;
 esac
 NEW_VERSION="${MAJ}.${MIN}.${PAT}"
-TAG="speedtest-v${NEW_VERSION}"
+TAG="speedtest-${NEW_VERSION}"
 echo "[1/5] 版本 ${CUR} -> ${NEW_VERSION}"
 echo "$NEW_VERSION" > "$PLUGIN_DIR/VERSION"
 
