@@ -139,6 +139,8 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 			parsed, err = p.wireguardParser(proxy)
 		case "anytls":
 			parsed, err = p.anytlsParser(proxy)
+		case "snell":
+			parsed, err = p.snellParser(proxy)
 		case "naive":
 			parsed, err = p.naiveParser(proxy)
 		default:
@@ -250,6 +252,7 @@ var singboxConsumedKeys = map[string]bool{
 	"_dns_server": true, "_network": true,
 	"plugin": true, "plugin-opts": true,
 	"obfs": true, "obfs-param": true, "protocol": true, "protocol-param": true,
+	"obfs-opts": true, "reuse": true, "_userkey": true, "psk": true,
 	"up": true, "down": true,
 	"auth": true, "auth-str": true, "auth_str": true,
 	"ca": true, "ca-str": true, "ca_str": true,
@@ -1872,4 +1875,60 @@ func parseReserved(reserved interface{}) interface{} {
 		}
 	}
 	return nil
+}
+
+// snellParser 移植自 Sub-Store sing-box.js:sing-box 支持 snell v4/5/6,v5 输出转 v4;
+// v6 用 mode(default/unshaped/unsafe-raw),v4/5 用 obfs_mode/obfs_host。缺省版本不校验。
+// (shadow-tls detour 属小众,mmwX 范围内不处理。)
+func (p *SingboxProducer) snellParser(proxy Proxy) (map[string]interface{}, error) {
+	port := GetInt(proxy, "port")
+	if port < 0 || port > 65535 {
+		return nil, fmt.Errorf("invalid port")
+	}
+	version := GetInt(proxy, "version")
+	if version != 0 && version != 4 && version != 5 && version != 6 {
+		return nil, fmt.Errorf("platform sing-box does not support snell version %v", proxy["version"])
+	}
+	outputVersion := version
+	if version == 5 {
+		outputVersion = 4
+	}
+
+	parsed := map[string]interface{}{
+		"tag":         GetString(proxy, "name"),
+		"type":        "snell",
+		"server":      GetString(proxy, "server"),
+		"server_port": port,
+		"psk":         GetString(proxy, "psk"),
+	}
+	if outputVersion != 0 {
+		parsed["version"] = outputVersion
+	}
+	if uk := GetString(proxy, "_userkey"); uk != "" {
+		parsed["userkey"] = uk
+	}
+	if outputVersion == 6 {
+		if mode := GetString(proxy, "mode"); mode != "" {
+			parsed["mode"] = mode
+		}
+	} else if obfsOpts := GetMap(proxy, "obfs-opts"); obfsOpts != nil {
+		if mode := GetString(obfsOpts, "mode"); mode != "" && mode != "shadow-tls" {
+			parsed["obfs_mode"] = mode
+			if host := GetString(obfsOpts, "host"); host != "" {
+				parsed["obfs_host"] = host
+			}
+		}
+	}
+	if GetBool(proxy, "reuse") && (version == 0 || version >= 4) {
+		parsed["reuse"] = true
+	}
+	p.networkParser(proxy, parsed)
+	if GetBool(proxy, "fast-open") {
+		parsed["udp_fragment"] = true
+	}
+	p.tfoParser(proxy, parsed)
+	p.detourParser(proxy, parsed)
+	p.ipVersionParser(proxy, parsed)
+	p.domainResolverParser(proxy, parsed)
+	return parsed, nil
 }
