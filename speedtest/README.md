@@ -37,6 +37,9 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 <details>
 <summary>更新日志</summary>
 
+### vv0.1.2 (2026-07-08)
+- fix 脚本错误
+
 ### vv0.1.1 (2026-07-08)
 - speedtest支持snell mihomo
 
