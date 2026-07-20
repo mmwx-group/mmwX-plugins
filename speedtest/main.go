@@ -25,6 +25,7 @@ type wsMsg struct {
 	Bytes       int64   `json:"bytes,omitempty"`
 	URL         string  `json:"url,omitempty"`
 	Threads     int     `json:"threads,omitempty"`
+	BufSize     int64   `json:"buf_size,omitempty"`     // 每次收发 buffer 字节数(默认 1MB)
 	LatencyOnly bool    `json:"latency_only,omitempty"` // true 仅测真连接延迟(Cloudflare 204)
 	DownMbps    float64 `json:"down_mbps,omitempty"`
 	LatencyMs   int64   `json:"latency_ms,omitempty"`
@@ -202,6 +203,7 @@ func runJob(job wsMsg, send func(wsMsg) error) {
 		TestBytes:   job.Bytes,
 		TestURL:     job.URL,
 		Threads:     job.Threads,
+		BufSize:     int(job.BufSize),
 		LatencyOnly: job.LatencyOnly,
 	})
 	out := wsMsg{Type: "result", JobID: job.JobID, LatencyMs: res.LatencyMs, EgressIP: res.EgressIP}

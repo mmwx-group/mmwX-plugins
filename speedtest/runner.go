@@ -50,7 +50,44 @@ type Options struct {
 	TestBytes    int64         // 可选下载上限(0=不限,纯按时长)
 	Timeout      time.Duration
 	Threads      int  // 并发下载线程数(<=1 单线程)
+	BufSize      int  // 每次收发的 io/socket buffer 字节数(默认 1MB;clamp 见 clampSpeedTestParams)
 	LatencyOnly  bool // true 仅测真连接延迟(Cloudflare 204 多采样)不跑大文件下载
+}
+
+// 测速 buffer / 线程的取值边界。峰值内存 ≈ BufSize × Threads,maxSpeedTotalMem 防家用测速端 OOM。
+const (
+	defaultBufSize   = 1 << 20   // 1MB(= 历史固定值,向后兼容)
+	minBufSize       = 64 << 10  // 64KB
+	maxBufSize       = 16 << 20  // 16MB
+	maxSpeedThreads  = 64        // 并发下载线程上限
+	maxSpeedTotalMem = 256 << 20 // BufSize×Threads 上限:超了缩 BufSize
+)
+
+// clampSpeedTestParams 归一 bufSize(字节)与 threads,并把 bufSize×threads 峰值内存收敛到 maxSpeedTotalMem 内。
+// 0/越界回落默认(bufSize=1MB, threads=1)。
+func clampSpeedTestParams(bufSize, threads int) (int, int) {
+	if threads <= 0 {
+		threads = 1
+	}
+	if threads > maxSpeedThreads {
+		threads = maxSpeedThreads
+	}
+	if bufSize <= 0 {
+		bufSize = defaultBufSize
+	}
+	if bufSize < minBufSize {
+		bufSize = minBufSize
+	}
+	if bufSize > maxBufSize {
+		bufSize = maxBufSize
+	}
+	if int64(bufSize)*int64(threads) > maxSpeedTotalMem {
+		bufSize = maxSpeedTotalMem / threads
+		if bufSize < minBufSize {
+			bufSize = minBufSize
+		}
+	}
+	return bufSize, threads
 }
 
 // RunNodeTest 用 mihomo 起单节点代理,测延迟 + 下行吞吐。clashConfigJSON 是 node.ClashConfig。
@@ -115,11 +152,8 @@ func RunNodeTest(ctx context.Context, mihomoBin, clashConfigJSON string, opts Op
 
 	latency := measureLatency(ctx)
 
-	threads := opts.Threads
-	if threads <= 1 {
-		threads = 1
-	}
-	n, dur, err := downloadTimed(ctx, testURL, opts.TestDuration, opts.TestBytes, threads)
+	bufSize, threads := clampSpeedTestParams(opts.BufSize, opts.Threads)
+	n, dur, err := downloadTimed(ctx, testURL, opts.TestDuration, opts.TestBytes, threads, bufSize)
 	if err != nil {
 		return Result{LatencyMs: latency, EgressIP: egressIP}, fmt.Errorf("下载测速失败: %w", err)
 	}
@@ -212,27 +246,55 @@ var (
 	sharedTransport     *http.Transport
 )
 
+// sharedProxyTransport 延迟/出口IP 探测用(小请求),默认 1MB 读缓冲即可,单例复用。
 func sharedProxyTransport() *http.Transport {
 	sharedTransportOnce.Do(func() {
-		proxyURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
-		sharedTransport = &http.Transport{
-			Proxy:              http.ProxyURL(proxyURL),
-			ReadBufferSize:     1 << 20, // 1MB,降低 loopback->mihomo read syscall 频率
-			WriteBufferSize:    64 << 10,
-			DisableCompression: true,
-			ForceAttemptHTTP2:  false,
-			TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{}, // 显式禁 HTTP/2
-			MaxIdleConns:       64,
-			IdleConnTimeout:    90 * time.Second,
-		}
+		sharedTransport = newProxyTransport(defaultBufSize)
 	})
 	return sharedTransport
 }
 
-// 1MB 测速 io.Copy 缓冲池(默认 32KB 在 >100Mbps 时 syscall 太密)
-var bigCopyBufPool = sync.Pool{
-	New: func() any { b := make([]byte, 1<<20); return &b },
+// newProxyTransport 构造经 mihomo mixed-port 的 Transport。readBuf 决定 socket 读缓冲(降 read syscall 频率);
+// 禁 HTTP/2(单流被流控限速)、禁压缩。下载测速按用户选的 bufSize per-call 构造。
+func newProxyTransport(readBuf int) *http.Transport {
+	proxyURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
+	if readBuf < minBufSize {
+		readBuf = minBufSize
+	}
+	return &http.Transport{
+		Proxy:              http.ProxyURL(proxyURL),
+		ReadBufferSize:     readBuf,
+		WriteBufferSize:    64 << 10,
+		DisableCompression: true,
+		ForceAttemptHTTP2:  false,
+		TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{}, // 显式禁 HTTP/2
+		MaxIdleConns:       64,
+		IdleConnTimeout:    90 * time.Second,
+	}
 }
+
+// proxyClientBuf 下载测速用:按 bufSize 配 socket 读缓冲。
+func proxyClientBuf(bufSize int) *http.Client {
+	return &http.Client{Transport: newProxyTransport(bufSize)}
+}
+
+// getCopyBuf/putCopyBuf 自适应 io.CopyBuffer 缓冲池:cap>=size 复用,否则新建。
+// 支持用户选的 1/4/8/16M 包大小(峰值内存 ≈ bufSize×threads,已由 clampSpeedTestParams 收敛)。
+var copyBufPool sync.Pool
+
+func getCopyBuf(size int) *[]byte {
+	if v := copyBufPool.Get(); v != nil {
+		b := v.(*[]byte)
+		if cap(*b) >= size {
+			*b = (*b)[:size]
+			return b
+		}
+	}
+	b := make([]byte, size)
+	return &b
+}
+
+func putCopyBuf(b *[]byte) { copyBufPool.Put(b) }
 
 // measureLatency 经代理 GET 一个 204 端点,返回毫秒;失败返回 -1。
 func measureLatency(ctx context.Context) int64 {
@@ -301,12 +363,12 @@ func sortInt64Asc(a []int64) {
 	}
 }
 
-func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxBytes int64, threads int) (int64, time.Duration, error) {
+func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxBytes int64, threads, bufSize int) (int64, time.Duration, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, dur)
 	defer cancel()
 
 	if threads <= 1 {
-		return downloadSingle(dlCtx, dlURL, maxBytes)
+		return downloadSingle(dlCtx, dlURL, maxBytes, bufSize)
 	}
 
 	var wg sync.WaitGroup
@@ -317,7 +379,7 @@ func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxByte
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			n, _, e := downloadSingle(dlCtx, dlURL, maxBytes)
+			n, _, e := downloadSingle(dlCtx, dlURL, maxBytes, bufSize)
 			results[idx] = n
 			errs[idx] = e
 		}(i)
@@ -339,8 +401,8 @@ func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxByte
 	return 0, elapsed, firstErr
 }
 
-func downloadSingle(ctx context.Context, dlURL string, maxBytes int64) (int64, time.Duration, error) {
-	client := proxyClient()
+func downloadSingle(ctx context.Context, dlURL string, maxBytes int64, bufSize int) (int64, time.Duration, error) {
+	client := proxyClientBuf(bufSize)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
 	if err != nil {
 		return 0, 0, err
@@ -360,8 +422,8 @@ func downloadSingle(ctx context.Context, dlURL string, maxBytes int64) (int64, t
 	if maxBytes > 0 {
 		reader = io.LimitReader(resp.Body, maxBytes)
 	}
-	buf := bigCopyBufPool.Get().(*[]byte)
-	defer bigCopyBufPool.Put(buf)
+	buf := getCopyBuf(bufSize)
+	defer putCopyBuf(buf)
 	n, cerr := io.CopyBuffer(io.Discard, reader, *buf)
 	elapsed := time.Since(start)
 	if ctx.Err() == context.DeadlineExceeded || cerr == nil {
