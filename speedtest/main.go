@@ -5,17 +5,41 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+)
+
+//go:embed VERSION
+var versionRaw string
+
+// version 随 hello 上报给主控,用于在测速端列表里展示。
+//
+// 直接 embed VERSION 文件而不是写死常量:release.sh 会自动 bump 那个文件,
+// 手写常量必然和它漂移。注意主控判定「能否承担可达性探测」看的是 caps 而非版本号,
+// 版本只用于展示。
+var version = strings.TrimSpace(versionRaw)
+
+const (
+	// 单次 probe 最多拨测多少个目标 —— 防止主控(或被攻破的主控)拿家用测速端当端口扫描器。
+	probeMaxTargets = 200
+	// 并发拨测数上限:家用带宽/路由器连接表有限,开太大反而互相拖慢并可能触发 NAT 表爆掉。
+	probeConcurrency = 16
+	probeMinTimeout  = 500 * time.Millisecond
+	probeMaxTimeout  = 15 * time.Second
+	// 单轮最多逐条打印多少个不可达目标。整批全挂(断网、上游拒绝)时不该刷几百行。
+	probeLogFailLimit = 20
 )
 
 type wsMsg struct {
@@ -33,6 +57,22 @@ type wsMsg struct {
 	Status      string  `json:"status,omitempty"`
 	Error       string  `json:"error,omitempty"`
 	Name        string  `json:"name,omitempty"`
+
+	// ---- 可达性探测(被墙判定)。与测速无关:纯 TCP 拨测目标 host:port,**不经 mihomo** ——
+	// 要判的是"这个地址从本机所在网络能不能连上",套代理就失去意义了。
+	Version   string        `json:"version,omitempty"` // hello 携带,主控据此展示
+	Caps      []string      `json:"caps,omitempty"`    // hello 携带的能力集,老版本没有此字段
+	Targets   []string      `json:"targets,omitempty"` // master→tester:待拨测的 host:port 列表
+	TimeoutMS int           `json:"timeout_ms,omitempty"`
+	Results   []probeResult `json:"results,omitempty"` // tester→master
+}
+
+// probeResult 单个目标的拨测结果。
+type probeResult struct {
+	Target    string `json:"target"`
+	OK        bool   `json:"ok"`
+	LatencyMs int64  `json:"latency_ms,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 func main() {
@@ -154,7 +194,9 @@ func connectAndServe(wsURL, name string, onConnected func()) error {
 		return conn.WriteMessage(websocket.TextMessage, data)
 	}
 
-	_ = send(wsMsg{Type: "hello", Name: name})
+	// hello 带上版本与能力集。老版本只发 Name —— 主控据「有没有 caps」判断能否派可达性探测,
+	// 否则给老测速端派 probe 会被静默丢弃,主控只能干等超时。
+	_ = send(wsMsg{Type: "hello", Name: name, Version: version, Caps: []string{"speedtest", "probe"}})
 
 	// 心跳保活 — 应用层 ping(主控收到回 pong 一样会续 deadline)
 	stop := make(chan struct{})
@@ -185,8 +227,11 @@ func connectAndServe(wsURL, name string, onConnected func()) error {
 		if json.Unmarshal(data, &msg) != nil {
 			continue
 		}
-		if msg.Type == "run" {
+		switch msg.Type {
+		case "run":
 			go runJob(msg, send)
+		case "probe":
+			go runProbe(msg, send)
 		}
 		// pong 等忽略
 	}
@@ -249,4 +294,82 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// runProbe 执行一次可达性探测:并发 TCP 拨测每个目标,回报是否连得上 + 握手耗时。
+//
+// 为什么是裸 TCP 而不是走 mihomo:这里判的是「该 host:port 从本机所在网络能否建立连接」,
+// 也就是被墙与否。套上代理就变成了测代理链路,结论完全不同。
+//
+// 只报「连得上/连不上」,不做任何内容读写 —— 它不是端口扫描器,也不该被当成一个。
+func runProbe(job wsMsg, send func(wsMsg) error) {
+	targets := job.Targets
+	if len(targets) > probeMaxTargets {
+		log.Printf("[speedtester] probe 目标数 %d 超过上限 %d,已截断", len(targets), probeMaxTargets)
+		targets = targets[:probeMaxTargets]
+	}
+	timeout := time.Duration(job.TimeoutMS) * time.Millisecond
+	if timeout < probeMinTimeout {
+		timeout = probeMinTimeout
+	}
+	if timeout > probeMaxTimeout {
+		timeout = probeMaxTimeout
+	}
+	log.Printf("[speedtester] 收到可达性探测 job=%s targets=%d timeout=%s", job.JobID, len(targets), timeout)
+	started := time.Now()
+
+	results := make([]probeResult, len(targets))
+	sem := make(chan struct{}, probeConcurrency)
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		go func(i int, target string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			results[i] = dialProbe(target, timeout)
+		}(i, t)
+	}
+	wg.Wait()
+
+	// 逐条打印不可达的目标。主控只拿到 ok/不ok,判定被墙的依据到底是"连接超时"还是
+	// "域名解析不了",只有这里看得见 —— 排查误判时没这行日志基本无从下手。
+	// 可达的不逐条打(几十个节点每 5 分钟一轮会刷屏),汇总行给数量和耗时就够。
+	okN, failed := 0, 0
+	for _, r := range results {
+		if r.OK {
+			okN++
+			continue
+		}
+		failed++
+		if failed <= probeLogFailLimit {
+			log.Printf("[speedtester]   ✗ %s: %s", r.Target, r.Error)
+		}
+	}
+	if failed > probeLogFailLimit {
+		// 整批全挂时(断网、上游拒绝)别把日志刷成几百行
+		log.Printf("[speedtester]   ✗ 另有 %d 个目标不可达(已省略)", failed-probeLogFailLimit)
+	}
+	log.Printf("[speedtester] 探测完成 job=%s 可达 %d/%d 耗时 %s",
+		job.JobID, okN, len(results), time.Since(started).Round(time.Millisecond))
+	_ = send(wsMsg{Type: "probe_result", JobID: job.JobID, Status: "ok", Results: results})
+}
+
+// dialProbe 拨一个 host:port,返回是否可达与握手耗时。
+func dialProbe(target string, timeout time.Duration) probeResult {
+	res := probeResult{Target: target}
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		res.Error = "目标格式应为 host:port"
+		return res
+	}
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", target, timeout)
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	_ = conn.Close()
+	res.OK = true
+	res.LatencyMs = time.Since(start).Milliseconds()
+	return res
 }
