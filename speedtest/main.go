@@ -196,7 +196,13 @@ func connectAndServe(wsURL, name string, onConnected func()) error {
 
 	// hello 带上版本与能力集。老版本只发 Name —— 主控据「有没有 caps」判断能否派可达性探测,
 	// 否则给老测速端派 probe 会被静默丢弃,主控只能干等超时。
-	_ = send(wsMsg{Type: "hello", Name: name, Version: version, Caps: []string{"speedtest", "probe"}})
+	// probe6:本机能拨通公网 IPv6 才声明 —— 否则主控会把 v6 节点(都是外网 v6 地址)误报被墙
+	//(此测速端对所有 v6 目标都 network unreachable)。有 probe6 的源才被主控派去探 v6 节点。
+	caps := []string{"speedtest", "probe"}
+	if hasIPv6() {
+		caps = append(caps, "probe6")
+	}
+	_ = send(wsMsg{Type: "hello", Name: name, Version: version, Caps: caps})
 
 	// 心跳保活 — 应用层 ping(主控收到回 pong 一样会续 deadline)
 	stop := make(chan struct{})
@@ -302,6 +308,24 @@ func envOr(k, def string) string {
 // 也就是被墙与否。套上代理就变成了测代理链路,结论完全不同。
 //
 // 只报「连得上/连不上」,不做任何内容读写 —— 它不是端口扫描器,也不该被当成一个。
+// hasIPv6 检测本机能否拨通【公网 IPv6】,决定是否向主控声明 probe6 能力。
+// 家用测速端多在国内家庭网络,IPv6 可能没有 / 只通内网;而 mmwX 的 v6 节点都是外网 v6 地址,
+// 必须验证能连通公网 v6 才有资格探 v6 节点 —— 否则声明 probe6 反会把 v6 节点误报被墙
+//(本机对所有外网 v6 目标都 network unreachable)。逐个试几个全球可达的公网 v6 端点,任一拨通即有。
+func hasIPv6() bool {
+	endpoints := []string{
+		"[2606:4700:4700::1111]:443", // Cloudflare DNS
+		"[2001:4860:4860::8888]:443", // Google DNS
+	}
+	for _, ep := range endpoints {
+		if c, err := net.DialTimeout("tcp", ep, 3*time.Second); err == nil {
+			_ = c.Close()
+			return true
+		}
+	}
+	return false
+}
+
 func runProbe(job wsMsg, send func(wsMsg) error) {
 	targets := job.Targets
 	if len(targets) > probeMaxTargets {
