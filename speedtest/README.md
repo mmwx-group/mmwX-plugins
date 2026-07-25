@@ -37,6 +37,9 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 <details>
 <summary>更新日志</summary>
 
+### vv0.1.5 (2026-07-26)
+- fix 没有ipv6检测误报
+
 ### vv0.1.4 (2026-07-22)
 - 🌈 支持服务器IP可用性探测
 
