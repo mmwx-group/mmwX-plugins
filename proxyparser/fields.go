@@ -8,6 +8,12 @@ var skipCertVerifyAliases = []string{
 	"skip-cert-verify", "skip_cert_verify", "skipCertVerify",
 }
 
+// certFingerprintAliases 是 Xray/v2rayN 与 Hysteria 分享格式使用的服务端证书 SHA-256 字段。
+var certFingerprintAliases = []string{
+	"pcs", "pinnedPeerCertSha256", "pinned_peer_cert_sha256",
+	"pinSHA256", "pinsha256", "tls-fingerprint",
+}
+
 // truthy 判断 query 值是否表示"真"。
 func truthy(s string) bool {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -34,6 +40,10 @@ func boolFromAliases(params map[string]string, keys ...string) (val bool, presen
 // skipCertVerify 解析 skip-cert-verify 的全部别名。
 func skipCertVerify(params map[string]string) (val bool, present bool) {
 	return boolFromAliases(params, skipCertVerifyAliases...)
+}
+
+func certFingerprint(params map[string]string) string {
+	return firstNonEmpty(params, certFingerprintAliases...)
 }
 
 // firstNonEmpty 返回 params 中按 keys 顺序第一个非空值。

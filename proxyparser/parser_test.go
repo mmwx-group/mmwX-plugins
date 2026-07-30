@@ -139,6 +139,26 @@ func TestParse_SkipCertAliases(t *testing.T) {
 	}
 }
 
+func TestParse_CertificateFingerprintAliases(t *testing.T) {
+	tests := []struct {
+		uri  string
+		want string
+	}{
+		{"vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls&pcs=ABCDEF#vless", "ABCDEF"},
+		{"trojan://password@example.com:443?pinnedPeerCertSha256=123456#trojan", "123456"},
+		{"hysteria2://password@example.com:443?pinSHA256=FEDCBA#hy2", "FEDCBA"},
+	}
+	for _, test := range tests {
+		got, err := Parse(test.uri)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", test.uri, err)
+		}
+		if got["tls-fingerprint"] != test.want {
+			t.Errorf("Parse(%q) tls-fingerprint=%v, want %s", test.uri, got["tls-fingerprint"], test.want)
+		}
+	}
+}
+
 // TestParse_SubStoreBugFixes 验证对照 Sub-Store 修复的 3 个真 bug（下游 substore producer 衔接）。
 func TestParse_SubStoreBugFixes(t *testing.T) {
 	// 1) WireGuard：无连字符的 presharedkey 应规整为 pre-shared-key（下游只认 pre-shared-key/preshared-key）
