@@ -366,18 +366,15 @@ func (p *SurgeProducer) snell(proxy Proxy) (string, error) {
 
 	p.appendShadowTLS(result, proxy)
 
-	// Surge 下 snell 默认开启 reuse 与 tfo(TCP Fast Open);节点显式设置时尊重原值。
+	// reuse 保持历史默认；tfo 只在节点显式配置时输出，避免擅自改变客户端行为。
 	if IsPresent(proxy, "reuse") {
 		result.Append(fmt.Sprintf(",reuse=%v", GetBool(proxy, "reuse")))
 	} else {
 		result.Append(",reuse=true")
 	}
-	if IsPresent(proxy, "tfo") {
-		result.Append(fmt.Sprintf(",tfo=%v", GetBool(proxy, "tfo")))
-	} else if IsPresent(proxy, "fast-open") {
+	// appendCommonOptions 已输出显式 tfo；这里只兼容旧字段 fast-open。
+	if !IsPresent(proxy, "tfo") && IsPresent(proxy, "fast-open") {
 		result.Append(fmt.Sprintf(",tfo=%v", GetBool(proxy, "fast-open")))
-	} else {
-		result.Append(",tfo=true")
 	}
 
 	return result.String(), nil
@@ -401,7 +398,6 @@ func (p *SurgeProducer) tuic(proxy Proxy) (string, error) {
 	result.AppendIfPresent(`,uuid=%s`, "uuid")
 	result.AppendIfPresent(`,password="%s"`, "password")
 	result.AppendIfPresent(`,token=%s`, "token")
-
 
 	// port hopping
 	if IsPresent(proxy, "ports") {
