@@ -355,6 +355,24 @@ func TestURIHysteria2(t *testing.T) {
 	mustNotContain(t, uri, "alpn=")
 }
 
+func TestURIUserInfoKeepsSafeSymbolsAndEscapesDelimiters(t *testing.T) {
+	hy2 := produceURI(t, Proxy{
+		"type": "hysteria2", "name": "hy2", "server": "hy.example.com", "port": 443,
+		"password": `price$+value=@/?#%`,
+	})
+	if !strings.HasPrefix(hy2, `hysteria2://price$+value=%40%2F%3F%23%25@hy.example.com:443?`) {
+		t.Fatalf("unexpected hysteria2 userinfo: %s", hy2)
+	}
+
+	ss2022 := produceURI(t, Proxy{
+		"type": "ss", "name": "ss", "server": "ss.example.com", "port": 8388,
+		"cipher": "2022-blake3-aes-128-gcm", "password": `ab+$=/@?#%`,
+	})
+	if !strings.HasPrefix(ss2022, `ss://2022-blake3-aes-128-gcm:ab+$=%2F%40%3F%23%25@ss.example.com:8388`) {
+		t.Fatalf("unexpected shadowsocks 2022 userinfo: %s", ss2022)
+	}
+}
+
 // TestURIHysteria: 字段映射 up→upmbps, down→downmbps, auth-str→auth,
 // ports→mport, sni→peer, obfs→obfsParam, _obfs→obfs, skip-cert-verify→insecure。
 func TestURIHysteria(t *testing.T) {

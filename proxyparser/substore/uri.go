@@ -61,6 +61,30 @@ func uriEncodeComponent(s string) string {
 	return b.String()
 }
 
+// uriEncodeUserInfo 编码 URI authority 中的用户名/密码。
+//
+// encodeURIComponent 会把 RFC 3986 明确允许出现在 userinfo 中的 sub-delims
+// （如 $、+、=）也编码成 %XX。虽然标准客户端应当解码，但部分代理客户端会把
+// 百分号编码后的文本直接当作密码，导致认证失败。这里保留合法 userinfo 字符，
+// 同时继续编码 @、/、?、#、% 等会改变 URI 结构或产生歧义的字符。
+func uriEncodeUserInfo(s string) string {
+	const upperhex = "0123456789ABCDEF"
+	const safe = "-._~!$&'()*+,;=:"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			strings.ContainsRune(safe, rune(c)) {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('%')
+			b.WriteByte(upperhex[c>>4])
+			b.WriteByte(upperhex[c&0x0F])
+		}
+	}
+	return b.String()
+}
+
 // uriTruthy 镜像 JS 真值判断 (if (proxy[key]))。注意:JS 中数字 0 为假,但字符串 "0" 为真;
 // 空串/nil/false/数字 0 视为假,其余为真。
 func uriTruthy(v interface{}) bool {
@@ -794,7 +818,7 @@ func (p *URIProducer) encodeShadowsocks(proxy Proxy) (string, error) {
 	// userinfo: 2022-blake3-* 不 base64 (JS line 828-832)
 	var userInfoPart string
 	if strings.HasPrefix(cipher, "2022-blake3-") {
-		userInfoPart = uriEncodeComponent(cipher) + ":" + uriEncodeComponent(password)
+		userInfoPart = uriEncodeUserInfo(cipher) + ":" + uriEncodeUserInfo(password)
 	} else {
 		userInfoPart = base64.StdEncoding.EncodeToString([]byte(cipher + ":" + password))
 	}
@@ -1028,7 +1052,7 @@ func (p *URIProducer) encodeHysteria2(proxy Proxy) (string, error) {
 	}
 
 	uri := fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s",
-		uriEncodeComponent(password), server, port, strings.Join(ps, "&"), uriEncodeComponent(name))
+		uriEncodeUserInfo(password), server, port, strings.Join(ps, "&"), uriEncodeComponent(name))
 	return uri, nil
 }
 
