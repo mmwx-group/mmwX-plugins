@@ -252,3 +252,43 @@ func TestStashFullConfigContainsDialerProxy(t *testing.T) {
 		t.Fatalf("全量配置应包含 dialer-proxy 字段")
 	}
 }
+
+// Stash 客户端已支持 mieru,不应再被当作不支持的协议整个丢弃。
+//
+// 此前 isSupportedType 的白名单里没有 mieru,订阅转 Stash 时这类节点会被静默过滤,
+// 用户侧表现为「Stash 里看不到 mieru 节点」。模块其余部分(解析 mieru://、输出 URI)
+// 一直是支持的,只有这一处白名单漏了。
+func TestStashKeepsMieru(t *testing.T) {
+	proxies := []Proxy{
+		{"name": "mieru-tcp", "type": "mieru", "server": "1.1.1.1", "port": 2999,
+			"username": "u", "password": "p", "transport": "TCP"},
+	}
+	if got := produceStashCount(t, proxies, &ProduceOptions{}); got != 1 {
+		t.Fatalf("mieru 应被保留, 期望 1, 实际 %d", got)
+	}
+}
+
+// 保留之外还要保住 mieru 的专有字段,否则节点导出去也连不上。
+func TestStashMieruKeepsCredentials(t *testing.T) {
+	got := produceStashInternal(t, Proxy{
+		"name": "mieru", "type": "mieru", "server": "1.1.1.1", "port": 2999,
+		"username": "alice", "password": "s3cret", "transport": "TCP",
+	}, &ProduceOptions{})
+	for k, want := range map[string]any{
+		"type": "mieru", "username": "alice", "password": "s3cret", "transport": "TCP",
+	} {
+		if got[k] != want {
+			t.Errorf("%s = %v, want %v", k, got[k], want)
+		}
+	}
+}
+
+// 反向确认过滤仍在:真正不支持的类型还是要丢掉,别把白名单改成形同虚设。
+func TestStashStillDropsUnsupportedType(t *testing.T) {
+	proxies := []Proxy{
+		{"name": "x", "type": "definitely-not-a-real-protocol", "server": "1.1.1.1", "port": 443},
+	}
+	if got := produceStashCount(t, proxies, &ProduceOptions{}); got != 0 {
+		t.Fatalf("未知协议仍应被丢弃, 实际保留了 %d 个", got)
+	}
+}

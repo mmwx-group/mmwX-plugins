@@ -873,6 +873,8 @@ func (p *StashProducer) isSupportedType(proxyType string) bool {
 		"trojan", "tuic", "vless", "wireguard",
 		"hysteria", "hysteria2", "ssh", "juicity", "anytls",
 		"tailscale", "trusttunnel",
+		// Stash 已支持 mieru;此前不在白名单,订阅转 Stash 时这类节点被静默丢弃。
+		"mieru",
 	}
 
 	for _, t := range supportedTypes {
