@@ -1,7 +1,6 @@
 package substore
 
 import (
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -323,20 +322,10 @@ func (p *EgernProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 		return result, nil
 	}
 
-	// Generate YAML string with JSON representation
-	var sb strings.Builder
-	sb.WriteString("proxies:\n")
-	for _, proxy := range result {
-		jsonBytes, err := json.Marshal(proxy)
-		if err != nil {
-			continue
-		}
-		sb.WriteString("  - ")
-		sb.Write(jsonBytes)
-		sb.WriteString("\n")
-	}
-
-	return sb.String(), nil
+	// 块状 YAML。曾经这里发的是 JSON-in-YAML(`- {"vless":{...}}`),规范上合法但
+	// Egern 的解析器不收(用户实报),官方文档给的也是块状。emitEgernYAML 里写了
+	// 为什么不能直接用 yaml.Marshal。
+	return emitEgernYAML(result), nil
 }
 
 // isSupportedType checks if a proxy type is supported by Egern
