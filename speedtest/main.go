@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +66,19 @@ type wsMsg struct {
 	Targets   []string      `json:"targets,omitempty"` // master→tester:待拨测的 host:port 列表
 	TimeoutMS int           `json:"timeout_ms,omitempty"`
 	Results   []probeResult `json:"results,omitempty"` // tester→master
+
+	// ---- 中转抓取。主控把「抓这个 URL」派给测速端,用测速端自己的出口 IP 去取 ——
+	// 不少机场只允许大陆 IP 访问,而主控常在海外,家用测速端正好当这个出口。
+	UserAgent  string            `json:"user_agent,omitempty"`
+	StatusCode int               `json:"status_code,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Body       string            `json:"body,omitempty"` // base64:订阅可能是二进制
+
+	// ---- 远程更新。主控只下发固定 Release 的版本、下载地址与摘要；测速端校验后替换自身。
+	TargetVersion string `json:"target_version,omitempty"`
+	DownloadURL   string `json:"download_url,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	Progress      int    `json:"progress,omitempty"`
 }
 
 // probeResult 单个目标的拨测结果。
@@ -198,7 +212,7 @@ func connectAndServe(wsURL, name string, onConnected func()) error {
 	// 否则给老测速端派 probe 会被静默丢弃,主控只能干等超时。
 	// probe6:本机能拨通公网 IPv6 才声明 —— 否则主控会把 v6 节点(都是外网 v6 地址)误报被墙
 	//(此测速端对所有 v6 目标都 network unreachable)。有 probe6 的源才被主控派去探 v6 节点。
-	caps := []string{"speedtest", "probe"}
+	caps := []string{"speedtest", "probe", "update", "fetch", "os:" + runtime.GOOS, "arch:" + runtime.GOARCH}
 	if hasIPv6() {
 		caps = append(caps, "probe6")
 	}
@@ -238,6 +252,10 @@ func connectAndServe(wsURL, name string, onConnected func()) error {
 			go runJob(msg, send)
 		case "probe":
 			go runProbe(msg, send)
+		case "update":
+			go runUpdate(msg, send)
+		case "fetch":
+			go runFetch(msg, send)
 		}
 		// pong 等忽略
 	}
@@ -311,7 +329,7 @@ func envOr(k, def string) string {
 // hasIPv6 检测本机能否拨通【公网 IPv6】,决定是否向主控声明 probe6 能力。
 // 家用测速端多在国内家庭网络,IPv6 可能没有 / 只通内网;而 mmwX 的 v6 节点都是外网 v6 地址,
 // 必须验证能连通公网 v6 才有资格探 v6 节点 —— 否则声明 probe6 反会把 v6 节点误报被墙
-//(本机对所有外网 v6 目标都 network unreachable)。逐个试几个全球可达的公网 v6 端点,任一拨通即有。
+// (本机对所有外网 v6 目标都 network unreachable)。逐个试几个全球可达的公网 v6 端点,任一拨通即有。
 func hasIPv6() bool {
 	endpoints := []string{
 		"[2606:4700:4700::1111]:443", // Cloudflare DNS

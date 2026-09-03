@@ -24,7 +24,6 @@ import (
 const (
 	defaultTestURL      = "https://dl.google.com/dl/android/studio/install/3.4.1.0/android-studio-ide-183.5522156-windows.exe"
 	defaultTestDuration = 8 * time.Second
-	latencyProbeURL     = "https://www.gstatic.com/generate_204"
 	cfLatencyProbeURL   = "https://cp.cloudflare.com/generate_204" // 真延迟用 Cloudflare 204(全球边缘 + CDN 边)
 	egressIPProbeURL    = "https://api.ipify.org"                  // 经代理回显出口 IP,用于核对出站链路是否符合预期
 	mixedPort           = 17900                                    // 串行测速,固定端口即可
@@ -150,7 +149,15 @@ func RunNodeTest(ctx context.Context, mihomoBin, clashConfigJSON string, opts Op
 		return Result{LatencyMs: latency, EgressIP: egressIP}, nil
 	}
 
-	latency := measureLatency(ctx)
+	// **和 LatencyOnly 走同一套口径**:同一个 Cloudflare 端点、同样的多采样取最快 2 个。
+	//
+	// 从前这里调的是 measureLatency —— gstatic 端点 + **单次采样(含 TLS 握手与 mihomo
+	// 冷启动)**。两处差异叠加,组合测速报出来的延迟必然比"只测延迟"高一截,而两个数字
+	// 在同一个界面上并排显示,用户只会认为其中一个是错的(用户实报,且是复发工单:
+	// 上一轮声称"已统一为多采样口径",但只改了 LatencyOnly 那一支,这条主路径没动)。
+	//
+	// 延迟必须在下载之前测:下载会把链路占满,之后再测就是排队延迟而不是链路延迟。
+	latency := measureLatencyCloudflare(ctx, cfLatencySamples)
 
 	bufSize, threads := clampSpeedTestParams(opts.BufSize, opts.Threads)
 	n, dur, err := downloadTimed(ctx, testURL, opts.TestDuration, opts.TestBytes, threads, bufSize)
@@ -295,24 +302,6 @@ func getCopyBuf(size int) *[]byte {
 }
 
 func putCopyBuf(b *[]byte) { copyBufPool.Put(b) }
-
-// measureLatency 经代理 GET 一个 204 端点,返回毫秒;失败返回 -1。
-func measureLatency(ctx context.Context) int64 {
-	client := proxyClient()
-	client.Timeout = 10 * time.Second
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, latencyProbeURL, nil)
-	if err != nil {
-		return -1
-	}
-	start := time.Now()
-	resp, err := client.Do(req)
-	if err != nil {
-		return -1
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return time.Since(start).Milliseconds()
-}
 
 // measureLatencyCloudflare 用 Cloudflare 204 多次采样,取最快 2 个均值;
 // 首包受 TLS 握手 / mihomo cold-start 影响,平均后更接近"真连接延迟"。全部失败返回 -1。
