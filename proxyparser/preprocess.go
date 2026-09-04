@@ -21,7 +21,7 @@ var supportedSchemes = []string{
 	"hysteria://", "hysteria2://", "hy2://", "tuic://",
 	"socks://", "socks5://", "http://", "https://",
 	"wireguard://", "wg://", "anytls://",
-	"naive://", "naive+https://", "naive+http://", "mieru://", "snell://",
+	"naive://", "naive+https://", "naive+http://", "mieru://", "mierus://", "snell://",
 }
 
 // SupportedSchemes 返回支持的 URI scheme 前缀（副本）。

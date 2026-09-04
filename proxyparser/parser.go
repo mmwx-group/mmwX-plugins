@@ -1497,9 +1497,18 @@ func parseNaiveURL(uri string) (map[string]any, error) {
 	return node, nil
 }
 
-// parseMieruURL parses mieru:// URL
+// parseMieruURL parses mieru:// / mierus:// URL
+//
+// 官方客户端导出的链接长这样(#115),与社区常见写法有三处不同,逐一在下面处理:
+//
+//	mierus://user:pass@1.2.3.4?handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400
+//	   &multiplexing=MULTIPLEXING_OFF&port=11211&profile=default&protocol=TCP
+//
+//   - scheme 带 s
+//   - **端口在 query 里**,host 段只有地址 —— 按老写法解析出来端口是 0,节点连不上
+//   - 传输协议叫 protocol,不叫 transport
 func parseMieruURL(uri string) (map[string]any, error) {
-	content := strings.TrimPrefix(uri, "mieru://")
+	content := strings.TrimPrefix(strings.TrimPrefix(uri, "mierus://"), "mieru://")
 	name := "Mieru Node"
 	mainPart := content
 
@@ -1523,6 +1532,13 @@ func parseMieruURL(uri string) (map[string]any, error) {
 	authPart, _ := url.QueryUnescape(mainPart[:atIdx])
 	serverPart := mainPart[atIdx+1:]
 	server, port := parseServerPortWithDefault(serverPart, 0)
+	// host 段没带端口时从 query 取 —— 官方导出的链接就是这么写的。
+	// host 段带了就以它为准:那是更具体的写法,不该被 query 覆盖。
+	if port == 0 {
+		if v, err := strconv.Atoi(queryParams["port"]); err == nil && v > 0 && v < 65536 {
+			port = v
+		}
+	}
 
 	var username, password string
 	if colonIdx := strings.Index(authPart, ":"); colonIdx != -1 {
@@ -1541,11 +1557,15 @@ func parseMieruURL(uri string) (map[string]any, error) {
 		"password": password,
 	}
 
-	if v := queryParams["transport"]; v != "" {
-		node["transport"] = v
-	} else if v := queryParams["handshake-mode"]; v != "" {
-		node["transport"] = v
-	} else {
+	// transport 只有 TCP / UDP 两个合法值(下游按它决定 xray 入站网络类型)。
+	// 官方链接里叫 protocol;原先的 handshake-mode 兜底是错的 ——
+	// HANDSHAKE_NO_WAIT 之类根本不是传输方式,塞进去等于写了个无效值。
+	switch {
+	case queryParams["transport"] != "":
+		node["transport"] = queryParams["transport"]
+	case queryParams["protocol"] != "":
+		node["transport"] = queryParams["protocol"]
+	default:
 		node["transport"] = "TCP"
 	}
 
@@ -1655,7 +1675,9 @@ func Parse(uri string) (map[string]any, error) {
 		return parseHTTPURL(uri)
 	case strings.HasPrefix(uri, "naive://"), strings.HasPrefix(uri, "naive+https://"), strings.HasPrefix(uri, "naive+http://"):
 		return parseNaiveURL(uri)
-	case strings.HasPrefix(uri, "mieru://"):
+	// mieru 官方客户端导出的链接用的是 mierus://(带 s),社区里两种写法都在流传。
+	// 只认 mieru:// 的话,官方导出的链接直接「不支持的协议」被丢掉(许可证站 #115)。
+	case strings.HasPrefix(uri, "mieru://"), strings.HasPrefix(uri, "mierus://"):
 		return parseMieruURL(uri)
 	case strings.HasPrefix(uri, "snell://"):
 		return parseSnellURL(uri)
