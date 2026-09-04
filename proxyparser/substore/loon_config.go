@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 //go:embed templates/loon_kelee.lcf
@@ -16,12 +17,31 @@ func BuildCompleteLoonConfig(clashConfig *ClashConfig, proxies []Proxy) (string,
 	// [General]
 	sections = append(sections, buildLoonGeneral(clashConfig))
 
+	// 合法策略名 = 所有节点名 + 所有策略组名。链式代理的首跳必须落在其中,
+	// 否则会生成一条指向不存在策略的链,Loon 直接判配置无效。
+	knownPolicies := map[string]bool{}
+	for _, p := range proxies {
+		if n := GetString(p, "name"); n != "" {
+			knownPolicies[n] = true
+		}
+	}
+	for _, g := range clashConfig.ProxyGroups {
+		if g.Name != "" {
+			knownPolicies[g.Name] = true
+		}
+	}
+
 	// [Proxy]
-	proxySection, err := buildLoonProxySection(proxies)
+	proxySection, chains, err := buildLoonProxySection(proxies, knownPolicies)
 	if err != nil {
 		return "", err
 	}
 	sections = append(sections, proxySection)
+
+	// [Proxy Chain] —— 只有存在链式节点时才输出这一段
+	if chainSection := buildLoonProxyChains(chains); chainSection != "" {
+		sections = append(sections, chainSection)
+	}
 
 	// [Proxy Group]
 	sections = append(sections, buildLoonProxyGroups(clashConfig.ProxyGroups))
@@ -58,15 +78,41 @@ func buildLoonGeneral(_ *ClashConfig) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildLoonProxySection(proxies []Proxy) (string, error) {
-	lines, err := buildLoonProxyLines(proxies)
+// loonChain 一条链式代理:chain 名沿用**原节点名**,落地节点改名后另行输出。
+//
+// 这样各策略组不用改:它们照旧引用原名,而原名现在指向的是「先走首跳、再走落地」
+// 的这条链。反过来做(链另起新名)就得同步改所有组的成员列表,极易漏。
+type loonChain struct {
+	name     string // 原节点名 = 链名
+	firstHop string // clash 里的 dialer-proxy(节点名或策略组名)
+	landing  string // 落地节点在 [Proxy] 里的新名字
+	udp      bool
+}
+
+func buildLoonProxySection(proxies []Proxy, knownPolicies map[string]bool) (string, []loonChain, error) {
+	lines, chains, err := buildLoonProxyLines(proxies, knownPolicies)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if lines != "" {
-		return "[Proxy]\n" + lines, nil
+		return "[Proxy]\n" + lines, chains, nil
 	}
-	return "[Proxy]", nil
+	return "[Proxy]", chains, nil
+}
+
+func buildLoonProxyChains(chains []loonChain) string {
+	if len(chains) == 0 {
+		return ""
+	}
+	lines := []string{"[Proxy Chain]"}
+	for _, c := range chains {
+		line := fmt.Sprintf("%s = %s, %s", c.name, c.firstHop, c.landing)
+		if c.udp {
+			line += ", udp=true"
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func buildLoonProxyGroups(groups []ClashProxyGroup) string {
@@ -182,12 +228,46 @@ func convertToLoonGroupType(clashType string) string {
 	}
 }
 
+// LoonRuleSetResolver 把一个 clash rule-provider 解析成可直接写进 Loon [Rule] 的行。
+//
+// 为什么要注入而不是在这里做:正确解析必须**真的拿到规则内容**(尤其 .mrs 是二进制,
+// 得去取同目录的 .yaml 再按 behavior 转换),而这个模块是纯函数、不联网。
+// 主控那边有 SSRF 安全的抓取客户端和缓存,由它实现。
+//
+// 返回 (lines, true) 表示已解析,调用方直接内联这些行;(nil, false) 表示解析不了。
+type LoonRuleSetResolver func(name string, provider ClashRuleProvider, policy string) ([]string, bool)
+
+var (
+	loonResolverMu sync.RWMutex
+	loonResolver   LoonRuleSetResolver
+)
+
+// SetLoonRuleSetResolver 注入解析器。主控启动时装配一次;不注入则退化为旧行为。
+func SetLoonRuleSetResolver(r LoonRuleSetResolver) {
+	loonResolverMu.Lock()
+	defer loonResolverMu.Unlock()
+	loonResolver = r
+}
+
+func resolveLoonRuleSet(name string, p ClashRuleProvider, policy string) ([]string, bool) {
+	loonResolverMu.RLock()
+	r := loonResolver
+	loonResolverMu.RUnlock()
+	if r == nil {
+		return nil, false
+	}
+	return r(name, p, policy)
+}
+
+// convertRuleURLToList 猜同目录下的 .list 版本。
+//
+// **只对 .yaml 这么猜**:主流规则仓库(Loyalsoldier 等)确实同时发布 .list,
+// 这条启发式一直是有效的。而 .mrs 不同 —— 它是二进制格式,很多仓库根本没有同名
+// .list,改扩展名要么 404、要么给 Loon 一个它读不懂的二进制(用户实报)。
+// 所以 .mrs 不再猜:有解析器就内联真实规则,没有就整条跳过,绝不产出错的地址。
 func convertRuleURLToList(url string) string {
 	if strings.HasSuffix(url, ".yaml") {
 		return strings.TrimSuffix(url, ".yaml") + ".list"
-	}
-	if strings.HasSuffix(url, ".mrs") {
-		return strings.TrimSuffix(url, ".mrs") + ".list"
 	}
 	return url
 }
@@ -223,8 +303,15 @@ func buildLoonRules(rules []string, ruleProviders map[string]ClashRuleProvider) 
 				policy := strings.TrimSpace(parts[2])
 
 				if provider, ok := ruleProviders[ruleSetName]; ok {
+					// 先给解析器机会:能拿到真实规则就直接内联,最准。
+					if resolved, done := resolveLoonRuleSet(ruleSetName, provider, policy); done {
+						lines = append(lines, resolved...)
+						continue
+					}
 					url := provider.URL
-					if url != "" {
+					// .mrs 是二进制,没解析器时整条跳过 —— 猜一个 .list 地址
+					// 只会得到 404 或读不懂的二进制,还不如让这条规则不生效。
+					if url != "" && !strings.HasSuffix(url, ".mrs") {
 						url = convertRuleURLToList(url)
 						remoteRules = append(remoteRules, fmt.Sprintf("%s, policy=%s, tag=%s, enabled=true",
 							url, policy, ruleSetName))
@@ -250,9 +337,21 @@ func buildLoonRules(rules []string, ruleProviders map[string]ClashRuleProvider) 
 
 // BuildLoonKeleeConfig uses the kelee template and fills in proxy nodes
 func BuildLoonKeleeConfig(proxies []Proxy) (string, error) {
-	proxyLines, err := buildLoonProxyLines(proxies)
+	// kelee 模板自带策略组,它们的名字**这里看不到** —— 所以只把「首跳是另一个节点」
+	// 的链认下来;首跳指向模板里某个组名时无法校验,宁可退回普通节点,
+	// 也不产出会让 Loon 整份拒载的悬空引用。
+	nodeNames := map[string]bool{}
+	for _, p := range proxies {
+		if n := GetString(p, "name"); n != "" {
+			nodeNames[n] = true
+		}
+	}
+	proxyLines, chains, err := buildLoonProxyLines(proxies, nodeNames)
 	if err != nil {
 		return "", err
+	}
+	if chainSection := buildLoonProxyChains(chains); chainSection != "" {
+		proxyLines += "\n\n" + chainSection
 	}
 
 	lines := strings.Split(loonKeleeTemplate, "\n")
@@ -272,19 +371,52 @@ func BuildLoonKeleeConfig(proxies []Proxy) (string, error) {
 	return strings.Join(result, "\n"), nil
 }
 
-func buildLoonProxyLines(proxies []Proxy) (string, error) {
+// buildLoonProxyLines 生成 [Proxy] 各行,并把带 dialer-proxy 的节点拆成
+// 「落地节点 + 一条链」。
+//
+// 不处理 dialer-proxy 的话,Loon 只会拿到一个普通落地节点 —— 流量直连落地、
+// 绕过入口,和 clash 侧的行为完全不同(用户实报)。
+func buildLoonProxyLines(proxies []Proxy, knownPolicies map[string]bool) (string, []loonChain, error) {
 	loonProducer := NewLoonProducer()
 	opts := &ProduceOptions{}
 
 	var lines []string
+	var chains []loonChain
 	for _, proxy := range proxies {
-		line, err := loonProducer.ProduceOne(proxy, "", opts)
+		name := GetString(proxy, "name")
+		firstHop := GetString(proxy, "dialer-proxy")
+		if firstHop == "" {
+			firstHop = GetString(proxy, "underlying-proxy")
+		}
+		// 首跳指向不存在的策略就退回普通节点:宁可少一跳,也不能产出
+		// 让 Loon 整份拒载的悬空引用。
+		chained := name != "" && firstHop != "" && firstHop != name && knownPolicies[firstHop]
+
+		out := proxy
+		if chained {
+			// 复制一份再改名 —— 调用方传进来的 map 不该被就地改写。
+			out = make(Proxy, len(proxy))
+			for k, v := range proxy {
+				out[k] = v
+			}
+			out["name"] = name + " [落地]"
+		}
+		line, err := loonProducer.ProduceOne(out, "", opts)
 		if err != nil {
 			continue
 		}
-		if line != "" {
-			lines = append(lines, line)
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+		if chained {
+			chains = append(chains, loonChain{
+				name:     name,
+				firstHop: firstHop,
+				landing:  GetString(out, "name"),
+				udp:      GetBool(proxy, "udp"),
+			})
 		}
 	}
-	return strings.Join(lines, "\n"), nil
+	return strings.Join(lines, "\n"), chains, nil
 }

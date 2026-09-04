@@ -195,3 +195,59 @@ func TestBuildLoonKeleeConfig(t *testing.T) {
 		t.Error("template Proxy Group should be preserved")
 	}
 }
+
+// clash 的 dialer-proxy 必须变成 Loon 的 [Proxy Chain]。
+//
+// 不处理的话 Loon 只拿到一个普通落地节点 —— 流量直连落地、绕过入口,
+// 和 clash 侧行为完全不同(用户实报)。
+func TestLoonDialerProxyBecomesProxyChain(t *testing.T) {
+	cfg := &ClashConfig{
+		ProxyGroups: []ClashProxyGroup{
+			{Name: "🚀 手动选择", Type: "select", Proxies: []string{"入口A", "新加坡落地"}},
+		},
+	}
+	proxies := []Proxy{
+		{"type": "ss", "name": "入口A", "server": "1.2.3.4", "port": 8388,
+			"cipher": "aes-128-gcm", "password": "p"},
+		{"type": "ss", "name": "新加坡落地", "server": "5.6.7.8", "port": 8388,
+			"cipher": "aes-128-gcm", "password": "p",
+			"dialer-proxy": "🚀 手动选择", "udp": true},
+	}
+	out, err := BuildCompleteLoonConfig(cfg, proxies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "[Proxy Chain]") {
+		t.Fatalf("缺少 [Proxy Chain] 段:\n%s", out)
+	}
+	// 链沿用原节点名,落地节点改名 —— 这样策略组不用改就仍然指向这条链
+	if !strings.Contains(out, "新加坡落地 = 🚀 手动选择, 新加坡落地 [落地], udp=true") {
+		t.Errorf("链定义不对:\n%s", out)
+	}
+	if !strings.Contains(out, "新加坡落地 [落地]=shadowsocks,5.6.7.8") {
+		t.Errorf("落地节点应改名后出现在 [Proxy] 里:\n%s", out)
+	}
+	// 没有 dialer-proxy 的节点保持原样
+	if !strings.Contains(out, "入口A=shadowsocks,1.2.3.4") {
+		t.Errorf("普通节点不该被改名:\n%s", out)
+	}
+}
+
+// 首跳指向不存在的策略时,退回普通节点 —— 悬空引用会让 Loon 整份拒载。
+func TestLoonDanglingDialerProxyFallsBack(t *testing.T) {
+	cfg := &ClashConfig{}
+	proxies := []Proxy{
+		{"type": "ss", "name": "落地", "server": "5.6.7.8", "port": 8388,
+			"cipher": "aes-128-gcm", "password": "p", "dialer-proxy": "并不存在的组"},
+	}
+	out, err := BuildCompleteLoonConfig(cfg, proxies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "[Proxy Chain]") {
+		t.Errorf("首跳不存在时不该生成链:\n%s", out)
+	}
+	if !strings.Contains(out, "落地=shadowsocks,5.6.7.8") {
+		t.Errorf("应保留为普通节点:\n%s", out)
+	}
+}
