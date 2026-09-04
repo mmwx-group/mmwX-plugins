@@ -420,3 +420,33 @@ func buildLoonProxyLines(proxies []Proxy, knownPolicies map[string]bool) (string
 	}
 	return strings.Join(lines, "\n"), chains, nil
 }
+
+// BuildLoonProxySections 给「模板注入」用:把节点渲染成 [Proxy] 段的行,
+// 并把带 dialer-proxy 的节点拆出 [Proxy Chain] 段的行(不含段头,由调用方拼)。
+//
+// extraPolicies 是模板里已定义的策略组名。链的首跳常常指向模板自带的组
+// (比如「🚀 手动选择」),不把这些名字传进来的话,那些链会因为「首跳未知」
+// 被丢掉 —— 而模板场景下这恰恰是最常见的一种。
+func BuildLoonProxySections(proxies []Proxy, extraPolicies []string) (string, string, error) {
+	known := map[string]bool{}
+	for _, p := range proxies {
+		if n := GetString(p, "name"); n != "" {
+			known[n] = true
+		}
+	}
+	for _, n := range extraPolicies {
+		if n != "" {
+			known[n] = true
+		}
+	}
+	lines, chains, err := buildLoonProxyLines(proxies, known)
+	if err != nil {
+		return "", "", err
+	}
+	chainSection := buildLoonProxyChains(chains)
+	chainSection = strings.TrimPrefix(chainSection, "[Proxy Chain]\n")
+	if chainSection == "[Proxy Chain]" {
+		chainSection = ""
+	}
+	return lines, chainSection, nil
+}
