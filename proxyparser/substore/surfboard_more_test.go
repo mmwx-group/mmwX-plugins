@@ -45,13 +45,27 @@ func TestSurfboardHysteria2(t *testing.T) {
 	}
 }
 
-func TestSurfboardHysteria2ObfsRejected(t *testing.T) {
+// Surfboard 自 2026-06-28(上游 795c980b)起支持 salamander 混淆,不再一刀切拒绝。
+// 这条断言原本锁的是旧行为 —— 而妙妙屋X 生成的 HY2 节点默认可能带 salamander,
+// 按旧行为整个节点会被丢出 Surfboard 订阅。
+func TestSurfboardHysteria2KeepsSalamander(t *testing.T) {
+	got := surfboardProduce(t, Proxy{
+		"name": "h2", "type": "hysteria2", "server": "e.com", "port": 443,
+		"password": "pw", "obfs": "salamander", "obfs-password": "obfspw",
+	})
+	if !strings.Contains(got, `salamander-password="obfspw"`) {
+		t.Errorf("应输出 salamander-password,实际: %s", got)
+	}
+}
+
+// 其它混淆 Surfboard 仍不支持,继续拒绝。
+func TestSurfboardHysteria2RejectsOtherObfs(t *testing.T) {
 	err := surfboardProduceErr(t, Proxy{
 		"name": "h2", "type": "hysteria2", "server": "e.com", "port": 443,
-		"obfs": "salamander",
+		"obfs": "gecko", "obfs-password": "x",
 	})
-	if err == nil || !strings.Contains(err.Error(), "obfs") {
-		t.Errorf("expected obfs rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "salamander") {
+		t.Errorf("gecko 应被拒且提示只支持 salamander,实际 %v", err)
 	}
 }
 

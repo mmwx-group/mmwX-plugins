@@ -258,7 +258,7 @@ var singboxConsumedKeys = map[string]bool{
 	"ca": true, "ca-str": true, "ca_str": true,
 	"recv-window-conn": true, "recv-window": true, "recv_window_conn": true, "recv_window": true,
 	"disable-mtu-discovery": true,
-	"obfs-password": true, "ports": true, "hop-interval": true,
+	"obfs-password":         true, "ports": true, "hop-interval": true,
 	"congestion-controller": true, "udp-relay-mode": true,
 	"reduce-rtt": true, "heartbeat-interval": true,
 	"ip": true, "ipv6": true, "public-key": true, "private-key": true,
@@ -269,7 +269,7 @@ var singboxConsumedKeys = map[string]bool{
 	"headers": true, "path": true,
 	"version": true, "token": true,
 	"idle-timeout": true, "padding": true,
-	"encryption": true,
+	"encryption":   true,
 	"udp-over-tcp": true, "udp-over-tcp-version": true,
 	"insecure": true, "peer": true, "disable-sni": true,
 	"ech-opts": true, "server-fingerprint": true,
@@ -1813,9 +1813,9 @@ func (p *SingboxProducer) wireguardParser(proxy Proxy) (map[string]interface{}, 
 		}
 
 		peer := map[string]interface{}{
-			"address":    peerServer,
-			"port":       peerPort,
-			"public_key": publicKey,
+			"address":     peerServer,
+			"port":        peerPort,
+			"public_key":  publicKey,
 			"allowed_ips": allowedIPs,
 		}
 		if preSharedKey != "" {

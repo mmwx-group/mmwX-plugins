@@ -9,11 +9,11 @@ func TestBuildCompleteLoonConfig(t *testing.T) {
 	clashConfig := &ClashConfig{
 		ProxyGroups: []ClashProxyGroup{
 			{
-				Name:      "Proxy",
-				Type:      "select",
-				Proxies:   []string{"Auto", "DIRECT", "节点A"},
-				URL:       "http://www.gstatic.com/generate_204",
-				Interval:  300,
+				Name:     "Proxy",
+				Type:     "select",
+				Proxies:  []string{"Auto", "DIRECT", "节点A"},
+				URL:      "http://www.gstatic.com/generate_204",
+				Interval: 300,
 			},
 			{
 				Name:      "Auto",
@@ -44,11 +44,11 @@ func TestBuildCompleteLoonConfig(t *testing.T) {
 
 	proxies := []Proxy{
 		{
-			"name":   "节点A",
-			"type":   "ss",
-			"server": "1.2.3.4",
-			"port":   443,
-			"cipher": "aes-256-gcm",
+			"name":     "节点A",
+			"type":     "ss",
+			"server":   "1.2.3.4",
+			"port":     443,
+			"cipher":   "aes-256-gcm",
 			"password": "test123",
 		},
 		{
@@ -118,10 +118,10 @@ func TestBuildCompleteLoonConfig(t *testing.T) {
 func TestBuildLoonProxyGroupsWithRegex(t *testing.T) {
 	groups := []ClashProxyGroup{
 		{
-			Name:    "HK",
-			Type:    "url-test",
-			Proxies: []string{"(香港|HK)"},
-			URL:     "http://www.gstatic.com/generate_204",
+			Name:     "HK",
+			Type:     "url-test",
+			Proxies:  []string{"(香港|HK)"},
+			URL:      "http://www.gstatic.com/generate_204",
 			Interval: 300,
 		},
 		{

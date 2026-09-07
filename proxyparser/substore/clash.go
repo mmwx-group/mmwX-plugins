@@ -35,20 +35,20 @@ func (p *ClashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 
 	// Supported ciphers for Shadowsocks
 	supportedSSCiphers := map[string]bool{
-		"aes-128-gcm":              true,
-		"aes-192-gcm":              true,
-		"aes-256-gcm":              true,
-		"aes-128-cfb":              true,
-		"aes-192-cfb":              true,
-		"aes-256-cfb":              true,
-		"aes-128-ctr":              true,
-		"aes-192-ctr":              true,
-		"aes-256-ctr":              true,
-		"rc4-md5":                  true,
-		"chacha20-ietf":            true,
-		"xchacha20":                true,
-		"chacha20-ietf-poly1305":   true,
-		"xchacha20-ietf-poly1305":  true,
+		"aes-128-gcm":             true,
+		"aes-192-gcm":             true,
+		"aes-256-gcm":             true,
+		"aes-128-cfb":             true,
+		"aes-192-cfb":             true,
+		"aes-256-cfb":             true,
+		"aes-128-ctr":             true,
+		"aes-192-ctr":             true,
+		"aes-256-ctr":             true,
+		"rc4-md5":                 true,
+		"chacha20-ietf":           true,
+		"xchacha20":               true,
+		"chacha20-ietf-poly1305":  true,
+		"xchacha20-ietf-poly1305": true,
 	}
 
 	// Filter proxies

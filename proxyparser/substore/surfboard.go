@@ -111,6 +111,8 @@ func (p *SurfboardProducer) produceSingle(proxy Proxy) (string, error) {
 		return p.socks5(proxy)
 	case "hysteria2":
 		return p.hysteria2(proxy)
+	case "tuic":
+		return p.tuic(proxy)
 	case "wireguard-surge":
 		return p.wireguard(proxy)
 	}
@@ -129,10 +131,56 @@ func (p *SurfboardProducer) produceSingle(proxy Proxy) (string, error) {
 	return "", fmt.Errorf("platform Surfboard does not support proxy type: %s", proxyType)
 }
 
+// tuic 把 TUIC v5 节点转成 Surfboard 格式(上游 2b28e1b5,2026-07-19 起支持)。
+// 之前这里没有分支,TUIC 节点会直接以「不支持的类型」被丢出订阅。
+// 只支持 v5:带 token 的是 v4,Surfboard 不认。
+func (p *SurfboardProducer) tuic(proxy Proxy) (string, error) {
+	if GetString(proxy, "token") != "" {
+		return "", fmt.Errorf("platform Surfboard does not support proxy type tuic v4")
+	}
+
+	result := NewResult(proxy)
+	result.Append(fmt.Sprintf("%s=tuic-v5,%s,%d",
+		GetString(proxy, "name"), GetString(proxy, "server"), GetInt(proxy, "port")))
+
+	result.AppendIfPresent(",uuid=%v", "uuid")
+	result.AppendIfPresent(`,password="%v"`, "password")
+
+	if surfboardHasNonBlankValue(proxy, "alpn") {
+		alpn := GetAnyString(proxy, "alpn")
+		if list, ok := proxy["alpn"].([]interface{}); ok {
+			parts := make([]string, 0, len(list))
+			for _, v := range list {
+				parts = append(parts, fmt.Sprintf("%v", v))
+			}
+			alpn = strings.Join(parts, ",")
+		}
+		result.Append(fmt.Sprintf(`,alpn="%s"`, alpn))
+	}
+
+	if surfboardHasNonBlankValue(proxy, "ports") {
+		ports := strings.ReplaceAll(GetAnyString(proxy, "ports"), ",", ";")
+		result.Append(fmt.Sprintf(`,port-hopping="%s"`, ports))
+	}
+	if surfboardHasNonBlankValue(proxy, "hop-interval") {
+		result.Append(fmt.Sprintf(",port-hopping-interval=%s", GetAnyString(proxy, "hop-interval")))
+	}
+
+	p.surfboardAppendTlsParams(result, proxy, true)
+	result.AppendIfPresent(",udp-relay=%v", "udp")
+
+	return result.String(), nil
+}
+
 // hysteria2 converts a hysteria2 proxy to Surfboard format
 func (p *SurfboardProducer) hysteria2(proxy Proxy) (string, error) {
-	if IsPresent(proxy, "obfs") || IsPresent(proxy, "obfs-password") {
-		return "", fmt.Errorf("Surfboard Hysteria2 does not support obfs")
+	// Surfboard 自 2026-06-28(上游 795c980b)起支持 salamander 混淆。
+	// 此前这里一刀切拒绝,带 salamander 的 HY2 节点会被整个丢出订阅 —— 而妙妙屋X 生成的
+	// HY2 节点默认就可能带 salamander,用户拿到的 Surfboard 订阅里直接少一个节点。
+	obfs := GetString(proxy, "obfs")
+	if (IsPresent(proxy, "obfs") && obfs != "salamander") ||
+		(IsPresent(proxy, "obfs-password") && obfs != "salamander") {
+		return "", fmt.Errorf("Surfboard Hysteria2 only supports salamander obfs")
 	}
 
 	result := NewResult(proxy)
@@ -148,6 +196,11 @@ func (p *SurfboardProducer) hysteria2(proxy Proxy) (string, error) {
 
 	if surfboardHasNonBlankValue(proxy, "hop-interval") {
 		result.Append(fmt.Sprintf(",port-hopping-interval=%s", GetAnyString(proxy, "hop-interval")))
+	}
+
+	// salamander 混淆密码(上游 795c980b)
+	if IsPresent(proxy, "obfs-password") {
+		result.Append(fmt.Sprintf(`,salamander-password="%s"`, GetString(proxy, "obfs-password")))
 	}
 
 	// tls verification

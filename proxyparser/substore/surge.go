@@ -572,10 +572,14 @@ func (p *SurgeProducer) wireguardSurge(proxy Proxy) (string, error) {
 }
 
 func (p *SurgeProducer) hysteria2(proxy Proxy, includeUnsupported bool) (string, error) {
-	// Check obfs support
+	// obfs:Surge 现在两种都收(上游 9405ac6f 加的 gecko),字段名各不相同。
+	obfsPasswordField := map[string]string{
+		"salamander": "salamander-password",
+		"gecko":      "gecko-password",
+	}[GetString(proxy, "obfs")]
 	if includeUnsupported {
-		if IsPresent(proxy, "obfs-password") && GetString(proxy, "obfs") != "salamander" {
-			return "", fmt.Errorf("only salamander obfs is supported")
+		if IsPresent(proxy, "obfs-password") && obfsPasswordField == "" {
+			return "", fmt.Errorf("only salamander and gecko obfs are supported")
 		}
 	} else {
 		if IsPresent(proxy, "obfs") || IsPresent(proxy, "obfs-password") {
@@ -599,9 +603,9 @@ func (p *SurgeProducer) hysteria2(proxy Proxy, includeUnsupported bool) (string,
 	}
 	result.AppendIfPresent(`,port-hopping-interval=%s`, "hop-interval")
 
-	// salamander obfs
-	if IsPresent(proxy, "obfs-password") && GetString(proxy, "obfs") == "salamander" {
-		result.Append(fmt.Sprintf(`,salamander-password="%s"`, GetString(proxy, "obfs-password")))
+	// salamander / gecko obfs
+	if IsPresent(proxy, "obfs-password") && obfsPasswordField != "" {
+		result.Append(fmt.Sprintf(`,%s="%s"`, obfsPasswordField, GetString(proxy, "obfs-password")))
 	}
 
 	p.appendIPVersion(result, proxy)
@@ -676,6 +680,12 @@ func (p *SurgeProducer) appendTLS(result *Result, _ Proxy) {
 	// SNI - compatible with both SubStore's "sni" and miaomiaowu's "servername"
 	if sni := GetSNI(result.Proxy); sni != "" {
 		result.Append(fmt.Sprintf(",sni=%s", sni))
+	}
+
+	// server-cert-verify-name:证书校验用的名字与 SNI 分开(上游 cfdcc035,2026-07-18)。
+	// 节点字段是 name-cert-verify;之前没输出,自建证书 + 非同名 SNI 的场景在 Surge 上会校验失败。
+	if v := GetString(result.Proxy, "name-cert-verify"); v != "" {
+		result.Append(fmt.Sprintf(",server-cert-verify-name=%s", v))
 	}
 
 	// ALPN - 数组逗号拼接 + 引号（对齐 Sub-Store：alpn="h2,http/1.1"），所有 TLS 协议统一输出
