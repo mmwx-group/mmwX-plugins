@@ -366,10 +366,14 @@ func (p *ClashMetaProducer) Produce(proxies []Proxy, outputType string, opts *Pr
 		}
 
 		// Delete tls for certain proxy types
+		// 这些协议 TLS 是内建的,不该再往外写 tls 字段。上游陆续补进了
+		// trusttunnel / masque / shadowquic(b63f6084 等),我们这边缺了会多输出一个
+		// mihomo 不认的字段。
 		deleteTLSTypes := map[string]bool{
 			"trojan": true, "tuic": true, "hysteria": true,
 			"hysteria2": true, "juicity": true, "anytls": true,
-			"naive": true,
+			"naive": true, "trusttunnel": true, "masque": true,
+			"shadowquic": true,
 		}
 		if deleteTLSTypes[proxyType] {
 			delete(transformed, "tls")

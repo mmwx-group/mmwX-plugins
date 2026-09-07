@@ -118,6 +118,10 @@ func (p *SurgeProducer) ProduceOne(proxy Proxy, outputType string, opts *Produce
 		return p.hysteria2(proxy, includeUnsupported)
 	case "ssh":
 		return p.ssh(proxy)
+	case "trusttunnel":
+		return p.trustTunnel(proxy)
+	case "masque-surge":
+		return p.masqueSurge(proxy)
 	case "wireguard":
 		if includeUnsupported {
 			return p.wireguard(proxy)
@@ -646,6 +650,48 @@ func (p *SurgeProducer) ssh(proxy Proxy) (string, error) {
 }
 
 // Helper methods
+
+// trustTunnel 输出 Surge 的 TrustTunnel 节点(上游 536bb1cd 起支持 h3)。
+// 之前没有这个分支,trusttunnel 节点在 Surge 订阅里被当成不支持的类型丢掉。
+func (p *SurgeProducer) trustTunnel(proxy Proxy) (string, error) {
+	result := NewResult(proxy)
+	result.Append(fmt.Sprintf("%s=trust-tunnel,%s,%d",
+		GetString(proxy, "name"), GetString(proxy, "server"), GetInt(proxy, "port")))
+	result.AppendIfPresent(`,username="%v"`, "username")
+	result.AppendIfPresent(`,password="%v"`, "password")
+	// 上游这里还会写根级 headers(appendHeaders),我们这套 producer 尚未支持根级 headers,
+	// 先跳过 —— 缺它只是少一个可选头,不影响节点能不能用。
+	result.AppendIfPresent(",max-streams=%v", "max-streams")
+	if GetString(proxy, "network") == "h3" {
+		result.Append(",h3=true")
+	}
+	p.appendIPVersion(result, proxy)
+	p.appendTLS(result, proxy)
+	p.appendCommonOptions(result, proxy)
+	return result.String(), nil
+}
+
+// masqueSurge 输出 Surge 的 MASQUE 节点(上游 6fff06f1,2026-09-03)。
+func (p *SurgeProducer) masqueSurge(proxy Proxy) (string, error) {
+	result := NewResult(proxy)
+	result.Append(fmt.Sprintf("%s=masque,%s,%d",
+		GetString(proxy, "name"), GetString(proxy, "server"), GetInt(proxy, "port")))
+	result.AppendIfPresent(`,username="%v"`, "username")
+	result.AppendIfPresent(`,password="%v"`, "password")
+
+	if IsPresent(proxy, "ports") {
+		ports := strings.ReplaceAll(GetAnyString(proxy, "ports"), ",", ";")
+		result.Append(fmt.Sprintf(`,port-hopping="%s"`, ports))
+	}
+	if IsPresent(proxy, "hop-interval") {
+		result.Append(fmt.Sprintf(",port-hopping-interval=%s", GetAnyString(proxy, "hop-interval")))
+	}
+
+	p.appendIPVersion(result, proxy)
+	p.appendTLS(result, proxy)
+	p.appendCommonOptions(result, proxy)
+	return result.String(), nil
+}
 
 func (p *SurgeProducer) appendIPVersion(result *Result, proxy Proxy) {
 	if ipVer := GetString(proxy, "ip-version"); ipVer != "" {

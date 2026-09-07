@@ -12,6 +12,10 @@ import (
 type SingboxProducer struct {
 	producerType string
 	helper       *ProxyHelper
+	// includeUnsupported 记住本次 Produce 的 include-unsupported-proxy 开关。
+	// sing-box 有一批字段只有非官方版认(client_name / quic_proxy_mode / certificate_server_name),
+	// 上游把它们挂在这个开关后面,官方版才不会收到不认识的字段。
+	includeUnsupported bool
 }
 
 // NewSingboxProducer creates a new sing-box producer
@@ -44,6 +48,7 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 	if opts == nil {
 		opts = &ProduceOptions{}
 	}
+	p.includeUnsupported = opts.IncludeUnsupportedProxy
 
 	// First, convert proxies to ClashMeta format (internal)
 	clashMetaProducer := NewClashMetaProducer()
@@ -239,6 +244,14 @@ func (p *SingboxProducer) tfoParser(proxy Proxy, parsed map[string]interface{}) 
 
 // singboxConsumedKeys are standard Clash proxy fields already handled by specific parsers.
 var singboxConsumedKeys = map[string]bool{
+	// 下面这几个由各自的 parser 显式处理(值要做类型归一,client_name /
+	// quic_proxy_mode / certificate_server_name 还只给非官方版)。
+	// 不列进来的话 passthroughExtraFields 会把 a-b 无脑转成 a_b 原样塞出去 ——
+	// 官方版 sing-box 收到不认识的字段会直接拒绝加载。
+	"client-name": true, "client-metadata": true,
+	"bbr-profile": true, "disable-chrome-parrot": true,
+	"quic-proxy-mode": true, "name-cert-verify": true,
+
 	"name": true, "type": true, "server": true, "port": true,
 	"password": true, "uuid": true, "cipher": true, "alterId": true,
 	"network": true, "tls": true, "skip-cert-verify": true,
@@ -1012,6 +1025,19 @@ func (p *SingboxProducer) shadowTLSParser(proxy Proxy) (map[string]interface{}, 
 		},
 	}
 
+	// shadow-tls 的 TLS 子项:insecure(官方版就认)与 certificate_server_name
+	// (只有非官方版认)。上游 25d10771。
+	if stTLS, ok := stPart["tls"].(map[string]interface{}); ok {
+		if GetBool(proxy, "skip-cert-verify") {
+			stTLS["insecure"] = true
+		}
+		if p.includeUnsupported {
+			if v := GetString(proxy, "name-cert-verify"); v != "" {
+				stTLS["certificate_server_name"] = v
+			}
+		}
+	}
+
 	if GetBool(proxy, "fast-open") {
 		stPart["udp_fragment"] = true
 	}
@@ -1521,6 +1547,14 @@ func (p *SingboxProducer) hysteria2Parser(proxy Proxy) (map[string]interface{}, 
 		}
 	}
 
+	// 上游 810ca5de:HY2 的 bbr_profile / disable_chrome_parrot。节点字段用连字符写法。
+	if v := GetString(proxy, "bbr-profile"); v != "" {
+		parsed["bbr_profile"] = v
+	}
+	if GetBool(proxy, "disable-chrome-parrot") {
+		parsed["disable_chrome_parrot"] = true
+	}
+
 	p.networkParser(proxy, parsed)
 	p.tlsParser(proxy, parsed)
 	p.tfoParser(proxy, parsed)
@@ -1621,6 +1655,18 @@ func (p *SingboxProducer) anytlsParser(proxy Proxy) (map[string]interface{}, err
 	if minIdleSession := GetString(proxy, "min-idle-session"); minIdleSession != "" {
 		if matched, _ := regexp.MatchString(`^\d+$`, minIdleSession); matched {
 			parsed["min_idle_session"], _ = strconv.Atoi(minIdleSession)
+		}
+	}
+
+	// client_metadata:官方版就支持(上游 a4c8741d)。节点字段是 client-metadata。
+	if v := GetString(proxy, "client-metadata"); v != "" {
+		parsed["client_metadata"] = v
+	}
+	// client_name:只有非官方版认(上游 95958c85),跟其它非官方字段一样挂在
+	// include-unsupported-proxy 后面,免得官方版收到不认识的字段。
+	if p.includeUnsupported {
+		if v := GetString(proxy, "client-name"); v != "" {
+			parsed["client_name"] = v
 		}
 	}
 
@@ -1921,6 +1967,11 @@ func (p *SingboxProducer) snellParser(proxy Proxy) (map[string]interface{}, erro
 	}
 	if GetBool(proxy, "reuse") && (version == 0 || version >= 4) {
 		parsed["reuse"] = true
+	}
+	// quic_proxy_mode:Snell v6 的字段,只有 sing-box 非官方版认(上游 30b9113d)。
+	// 节点字段是 quic-proxy-mode。
+	if p.includeUnsupported && GetBool(proxy, "quic-proxy-mode") {
+		parsed["quic_proxy_mode"] = true
 	}
 	p.networkParser(proxy, parsed)
 	if GetBool(proxy, "fast-open") {

@@ -73,6 +73,10 @@ func (p *EgernProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 		proxyType := p.helper.GetProxyType(proxy)
 
 		// Filter unsupported proxy types
+		// Egern 的 SSR 只吃流加密 + 白名单里的 protocol/obfs,其余照上游过滤掉。
+		if proxyType == "ssr" && !isEgernSSR(proxy) {
+			continue
+		}
 		if !p.isSupportedType(proxyType) {
 			continue
 		}
@@ -206,6 +210,8 @@ func (p *EgernProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 			transformed = p.transformSOCKS5(proxy, original)
 		case "ss":
 			transformed = p.transformShadowsocks(proxy, original)
+		case "ssr":
+			transformed = p.transformShadowsocksR(proxy, original)
 		case "hysteria2":
 			transformed = p.transformHysteria2(proxy, original)
 		case "tuic":
@@ -328,11 +334,87 @@ func (p *EgernProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 	return emitEgernYAML(result), nil
 }
 
+// Egern 的 shadowsocksr 只支持流加密;protocol / obfs 沿用 SSR 上游的插件名。
+// 名单对齐上游 egern.js 的 EGERN_SSR_*(df46feff)。
+var (
+	egernSSRMethods = map[string]bool{
+		"none": true, "dummy": true, "rc4-md5": true,
+		"aes-128-cfb": true, "aes-192-cfb": true, "aes-256-cfb": true,
+		"aes-128-ctr": true, "aes-192-ctr": true, "aes-256-ctr": true,
+		"chacha20": true, "chacha20-ietf": true, "xchacha20": true,
+	}
+	egernSSRProtocols = map[string]bool{
+		"origin": true, "auth_sha1_v4": true, "auth_aes128_md5": true,
+		"auth_aes128_sha1": true, "auth_chain_a": true, "auth_chain_b": true,
+	}
+	egernSSRObfs = map[string]bool{
+		"plain": true, "http_simple": true, "http_post": true, "random_head": true,
+		"tls1.2_ticket_auth": true, "tls1.2_ticket_fastauth": true,
+	}
+)
+
+func normalizeEgernSSRPlugin(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
+
+// normalizeEgernSSRMethod:Egern 的空加密写作 none / dummy,SSR 那边常写 plain。
+func normalizeEgernSSRMethod(cipher string) string {
+	m := normalizeEgernSSRPlugin(cipher)
+	if m == "plain" {
+		return "none"
+	}
+	return m
+}
+
+// isEgernSSR 判断这条 SSR 节点 Egern 认不认。protocol / obfs 留空由 Egern 自己补 origin / plain。
+func isEgernSSR(proxy Proxy) bool {
+	if !egernSSRMethods[normalizeEgernSSRMethod(GetString(proxy, "cipher"))] {
+		return false
+	}
+	if protocol := normalizeEgernSSRPlugin(GetString(proxy, "protocol")); protocol != "" && !egernSSRProtocols[protocol] {
+		return false
+	}
+	obfs := normalizeEgernSSRPlugin(GetString(proxy, "obfs"))
+	return obfs == "" || egernSSRObfs[obfs]
+}
+
+// transformShadowsocksR 把 SSR 节点转成 Egern 的 shadowsocksr。
+func (p *EgernProducer) transformShadowsocksR(proxy, _ Proxy) Proxy {
+	result := make(Proxy)
+	result["type"] = "shadowsocksr"
+	result["name"] = GetString(proxy, "name")
+	result["server"] = GetString(proxy, "server")
+	result["port"] = GetInt(proxy, "port")
+	result["password"] = GetString(proxy, "password")
+	result["method"] = normalizeEgernSSRMethod(GetString(proxy, "cipher"))
+
+	if protocol := normalizeEgernSSRPlugin(GetString(proxy, "protocol")); protocol != "" {
+		result["protocol"] = protocol
+	}
+	if v := GetString(proxy, "protocol-param"); v != "" {
+		result["protocol_param"] = v
+	}
+	if obfs := normalizeEgernSSRPlugin(GetString(proxy, "obfs")); obfs != "" {
+		result["obfs"] = obfs
+	}
+	if v := GetString(proxy, "obfs-param"); v != "" {
+		result["obfs_param"] = v
+	}
+
+	if tfo := GetBool(proxy, "tfo") || GetBool(proxy, "fast-open"); tfo {
+		result["tfo"] = tfo
+	}
+	if udp := GetBool(proxy, "udp") || GetBool(proxy, "udp_relay"); udp {
+		result["udp_relay"] = udp
+	}
+	return result
+}
+
 // isSupportedType checks if a proxy type is supported by Egern
 func (p *EgernProducer) isSupportedType(proxyType string) bool {
 	supportedTypes := []string{
 		"http", "socks5", "ss", "trojan", "hysteria2", "vless", "vmess", "tuic",
 		"wireguard", "anytls", "ssh", "snell",
+		// Egern 2026-09-07(上游 df46feff / 1018f7d6)起支持 shadowsocksr。
+		"ssr",
 	}
 	for _, t := range supportedTypes {
 		if t == proxyType {

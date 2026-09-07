@@ -120,9 +120,11 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 					continue
 				}
 			}
-			// 明确不支持的类型
+			// 明确不支持的类型。上游后来补了 shadowquic / zerotier(b63f6084、47ce75a4),
+			// 我们漏掉的话这两类节点会被原样输出到 Shadowrocket 配置里,客户端解析不了。
 			if proxyType == "tailscale" || proxyType == "sudoku" || proxyType == "naive" ||
-				proxyType == "openvpn" || proxyType == "gost-relay" {
+				proxyType == "openvpn" || proxyType == "gost-relay" ||
+				proxyType == "shadowquic" || proxyType == "zerotier" {
 				continue
 			}
 			// JS: network==='xhttp' 仅告警保留(VLESS XHTTP 结构复杂, Shadowrocket 可能无法完全兼容)
