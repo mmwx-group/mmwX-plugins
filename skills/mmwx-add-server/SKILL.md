@@ -21,10 +21,12 @@ description: 在妙妙屋X里接入并初始化一台新的远程服务器——
    - 需要 reality 时:`server_reality_domains`(传 server_id)看候选目标域名,`xray_generate_x25519` 生成密钥对。
    - `server_inbound_list`(传 server_id)核对入站,`server_inbound_outbounds` 核对出站,`server_routing_get` 看路由。
    - `node_create` 把入站手动出节点(或 `server_sync_nodes` 批量同步),`node_list` 可见新节点。
-8. **(可选)升级 agent**:若日后该 agent 版本落后主控,`server_agent_upgrade`(server_id + confirm)远程升级(SSE,会短暂失联)。
+8. **(可选)准备证书**:要建 TLS / reality 以外的加密入站时,先 `cert_list_valid` 看有没有可用证书;没有就 `cert_create`(域名 + `challenge_mode`,DNS 验证还要 `dns_provider_id`),签完 `cert_deploy` 部署到 nginx/xray。测试环境可以 `cert_self_signed` 凑合。
+9. **(可选)升级 agent**:若日后该 agent 版本落后主控,`server_agent_upgrade`(server_id + confirm)远程升级(SSE,会短暂失联)。
 
 ## 注意
 - 安装类是高危写操作,必须带 `confirm: true`;执行可能数分钟,工具会阻塞到完成。
 - 卸载 xray/nginx、重置令牌等高危操作**未开放**给 agent,需人工在 Web 端处理。
 - 装完若 `server_service_status` 显示未运行,检查安装日志返回里的报错;`server_xray_config_get` 拉取实际配置进一步定位。
-- 同 IP 多服务器场景请先用 `server_check_same_ip` 排查重复登记。
+- 同 IP 多服务器场景:用 `server_list` 比对各服务器的 `ip_address` / `same_host_as_master` 排查重复登记。**每台服务器必须用独立 token** —— 同一份 agent 配置复制到两台机器会触发抢占式重连风暴(两个 agent 反复互踢),还会拖垮主控的写队列、把无关服务器也误判成离线。
+- 装不上、装完起不来:`logs_agent`(`server_id`,`service=agent` 或 `xray`)直接读远端日志,比猜快得多。
