@@ -1356,6 +1356,20 @@ func (p *URIProducer) encodeAnyTLS(proxy Proxy) (string, error) {
 		params.Set("fp", fp)
 	}
 
+	// REALITY: Sub-Store 的 anytls 分支是复用 vless 生成器再把 scheme 换回来,
+	// 借此带出 security/pbk/sid。这里不改既有 URI 形态, 只补齐这三个参数, 保证
+	// AnyTLS+REALITY 节点经 uri/v2ray 订阅导出后仍能被 parseAnytlsURL 还原,
+	// 否则往返一趟 REALITY 就丢了。
+	if realityOpts := GetMap(proxy, "reality-opts"); realityOpts != nil {
+		params.Set("security", "reality")
+		if pubKey := GetString(realityOpts, "public-key"); pubKey != "" {
+			params.Set("pbk", pubKey)
+		}
+		if shortID := GetString(realityOpts, "short-id"); shortID != "" {
+			params.Set("sid", shortID)
+		}
+	}
+
 	// ALPN (frontend line 771-773)
 	if alpn := GetStringSlice(proxy, "alpn"); len(alpn) > 0 {
 		alpnStrs := make([]string, len(alpn))

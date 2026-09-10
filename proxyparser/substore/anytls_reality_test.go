@@ -137,3 +137,26 @@ func TestSingboxKeepsSniForImplicitTLSProtocols(t *testing.T) {
 		}
 	}
 }
+
+// AnyTLS+REALITY 导出成 anytls:// 时必须带上 security/pbk/sid,
+// 否则经 uri/v2ray 订阅往返一趟 REALITY 就丢了。
+func TestURIProducerKeepsAnytlsReality(t *testing.T) {
+	prod, err := GetDefaultFactory().GetProducer("uri")
+	if err != nil {
+		t.Fatalf("取 uri producer: %v", err)
+	}
+	raw, err := prod.Produce([]Proxy{{
+		"name": "n", "type": "anytls", "server": "38.1.2.3", "port": 20000,
+		"password": "pw", "sni": "www.example.com", "network": "tcp",
+		"reality-opts": map[string]any{"public-key": "PBKPBK", "short-id": "SIDSID"},
+	}}, "", nil)
+	if err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+	uri, _ := raw.(string)
+	for _, want := range []string{"anytls://", "security=reality", "pbk=PBKPBK", "sid=SIDSID"} {
+		if !strings.Contains(uri, want) {
+			t.Errorf("导出的 URI 缺少 %q: %s", want, uri)
+		}
+	}
+}
