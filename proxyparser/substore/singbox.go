@@ -674,8 +674,15 @@ func (p *SingboxProducer) grpcParser(proxy Proxy, parsed map[string]interface{})
 }
 
 func (p *SingboxProducer) tlsParser(proxy Proxy, parsed map[string]interface{}) {
-	tls := map[string]interface{}{
-		"enabled": false,
+	// 对齐 Sub-Store: 在各 parser 预置的 parsedProxy.tls 上原地叠加, 而不是从零构造。
+	// trojan/naive/hysteria/hysteria2/tuic/anytls 天生走 TLS, 由各自 parser 预置
+	// enabled:true; 若在这里重置回 false, 末尾就写不回去, sni/reality/alpn 全丢。
+	// 注意 ClashMeta 中间层会对这些类型 delete proxy.tls, 所以不能依赖 proxy["tls"]。
+	tls, _ := parsed["tls"].(map[string]interface{})
+	if tls == nil {
+		tls = map[string]interface{}{
+			"enabled": false,
+		}
 	}
 
 	if GetBool(proxy, "tls") {
@@ -807,9 +814,11 @@ func (p *SingboxProducer) tlsParser(proxy Proxy, parsed map[string]interface{}) 
 		tls["client_key_path"] = client_key_path
 	}
 
-	// Only add tls if enabled
-	if tls["enabled"].(bool) {
+	// Only add tls if enabled (对齐 Sub-Store 的 delete parsedProxy.tls)
+	if enabled, _ := tls["enabled"].(bool); enabled {
 		parsed["tls"] = tls
+	} else {
+		delete(parsed, "tls")
 	}
 }
 

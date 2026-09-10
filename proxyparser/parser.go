@@ -1266,6 +1266,31 @@ func parseAnytlsURL(uri string) (map[string]any, error) {
 		}
 	}
 
+	// 对齐 Sub-Store 的 URI_AnyTLS: 把同一条 URI 交给 VLESS 解析器再解一遍,
+	// 借它拿到 reality-opts / network / security 三项(本函数自己不解析 REALITY)。
+	// 这不只是为了补全字段: Sub-Store 在存在 reality-opts 时刻意保留 network="tcp",
+	// 下游 clashmeta/stash/loon 正是靠这个标记剔除自己不支持的 AnyTLS+REALITY 组合
+	// (mihomo 官方声明不支持该组合且不打算支持), 只放行 sing-box。少了这个标记,
+	// 带 REALITY 的节点会被错误下发给这些客户端。
+	if vlessNode, verr := parseVlessURL("vless://" + content); verr == nil {
+		if ro := vlessNode["reality-opts"]; ro != nil {
+			node["reality-opts"] = ro
+		}
+		if nw, ok := vlessNode["network"].(string); ok && nw != "" {
+			node["network"] = nw
+		}
+		if sec, ok := vlessNode["security"].(string); ok && sec != "" {
+			node["security"] = sec
+		}
+	}
+
+	// Sub-Store: network 为 tcp 且没有 reality-opts 时, 抹掉 network/security,
+	// 使普通 AnyTLS 节点不带多余标记, 各客户端照常下发。
+	if nw, _ := node["network"].(string); nw == "tcp" && node["reality-opts"] == nil {
+		delete(node, "network")
+		delete(node, "security")
+	}
+
 	return node, nil
 }
 
@@ -1501,12 +1526,12 @@ func parseNaiveURL(uri string) (map[string]any, error) {
 //
 // 官方客户端导出的链接长这样(#115),与社区常见写法有三处不同,逐一在下面处理:
 //
-//	mierus://user:pass@1.2.3.4?handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400
-//	   &multiplexing=MULTIPLEXING_OFF&port=11211&profile=default&protocol=TCP
+//		mierus://user:pass@1.2.3.4?handshake-mode=HANDSHAKE_NO_WAIT&mtu=1400
+//		   &multiplexing=MULTIPLEXING_OFF&port=11211&profile=default&protocol=TCP
 //
-//   - scheme 带 s
-//   - **端口在 query 里**,host 段只有地址 —— 按老写法解析出来端口是 0,节点连不上
-//   - 传输协议叫 protocol,不叫 transport
+//	  - scheme 带 s
+//	  - **端口在 query 里**,host 段只有地址 —— 按老写法解析出来端口是 0,节点连不上
+//	  - 传输协议叫 protocol,不叫 transport
 func parseMieruURL(uri string) (map[string]any, error) {
 	content := strings.TrimPrefix(strings.TrimPrefix(uri, "mierus://"), "mieru://")
 	name := "Mieru Node"
