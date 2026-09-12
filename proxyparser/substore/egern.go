@@ -571,7 +571,12 @@ func (p *EgernProducer) transformHysteria2(proxy, original Proxy) Proxy {
 		result["next_hop"] = GetString(proxy, "next_hop")
 	}
 
-	if IsPresent(proxy, "servername") {
+	// Clash/Mihomo 的 Hysteria2 用标准 sni 字段;servername 只是部分输入的别名。
+	// 优先取 sni,回退 servername —— 早前只读 servername,导致仅填 sni 的 HY2 节点
+	// 转 Egern 时丢失 SNI、IP 入口证书校验失败(#735)。
+	if IsPresent(proxy, "sni") {
+		result["sni"] = GetString(proxy, "sni")
+	} else if IsPresent(proxy, "servername") {
 		result["sni"] = GetString(proxy, "servername")
 	}
 

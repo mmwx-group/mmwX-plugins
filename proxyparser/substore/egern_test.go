@@ -152,6 +152,35 @@ func TestEgernSnell(t *testing.T) {
 	}
 }
 
+func TestEgernHysteria2SNI(t *testing.T) {
+	// #735:只填标准 sni(无 servername)的 HY2 节点转 Egern 必须保留 sni。
+	out := produceEgern(t, Proxy{
+		"type": "hysteria2", "name": "hy2-sni", "server": "192.0.2.10", "port": 443,
+		"password": "pw", "sni": "hy2.example.com", "skip-cert-verify": false,
+	})
+	wantEgern(t, out, "hysteria2", map[string]any{
+		"auth": "pw", "sni": "hy2.example.com",
+	})
+
+	// servername 别名仍可回退。
+	alias := produceEgern(t, Proxy{
+		"type": "hysteria2", "name": "hy2-alias", "server": "x", "port": 1,
+		"password": "p", "servername": "alias.example.com",
+	})
+	if _, fields := egernProxy(t, alias); fields["sni"] != "alias.example.com" {
+		t.Errorf("servername 应回退为 sni:\n%s", alias)
+	}
+
+	// 两者都在时以标准 sni 为准。
+	both := produceEgern(t, Proxy{
+		"type": "hysteria2", "name": "hy2-both", "server": "x", "port": 1,
+		"password": "p", "sni": "real.example.com", "servername": "other.example.com",
+	})
+	if _, fields := egernProxy(t, both); fields["sni"] != "real.example.com" {
+		t.Errorf("sni 应优先于 servername:\n%s", both)
+	}
+}
+
 func TestEgernSSH(t *testing.T) {
 	out := produceEgern(t, Proxy{
 		"type": "ssh", "name": "ssh1", "server": "1.2.3.4", "port": 22,
