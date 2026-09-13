@@ -1,6 +1,7 @@
 package substore
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/MMWOrg/mmwX-plugins/proxyparser/logger"
@@ -14,7 +15,19 @@ type RegionProxyGroup struct {
 	Filter string
 }
 
+// OtherRegionsGroupName 是「其他地区」组的组名。
+// 它不在 RegionProxyGroups 里:该组不是靠 filter 命中，而是靠 exclude-filter 把上面
+// 所有地区排掉，见 insertRegionProxyGroups / GetOtherRegionsExcludeFilter。
+const OtherRegionsGroupName = "🌐 其他地区"
+
 // Predefined region proxy groups
+//
+// 注意：这里只放「靠 filter 正着命中」的地区。以前末尾还挂着一条
+// {Name: "🌐 其他地区", Filter: "(^(?!.*(全部地区关键词)).*)"}，有两个害处：
+//  1. insertRegionProxyGroups 遍历完本表后还会再单独建一个「🌐 其他地区」，产出重名组；
+//  2. 那条 filter 用了负向先行断言，RE2 编译不了，还会被 GetOtherRegionsExcludeFilter
+//     拼进「其他地区」的 exclude-filter 里，把整条 exclude 也带成编译失败
+//     （结果就是「其他地区」要么空掉被删、要么一个节点都排不掉）。
 var RegionProxyGroups = []RegionProxyGroup{
 	{Name: "🇭🇰 香港节点", Filter: `🇭🇰|港|\bHK(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|hk|Hong Kong|HongKong|hongkong|HONG KONG|HONGKONG|深港|HKG|九龙|Kowloon|新界|沙田|荃湾|葵涌`},
 	{Name: "🇺🇸 美国节点", Filter: `🇺🇸|美|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|纽约|纽纽|亚特兰大|迈阿密|华盛顿|\bUS(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|United States|UnitedStates|UNITED STATES|USA|America|AMERICA|JFK|EWR|IAD|ATL|ORD|MIA|NYC|LAX|SFO|SEA|DFW|SJC`},
@@ -28,7 +41,6 @@ var RegionProxyGroups = []RegionProxyGroup{
 	{Name: "🇩🇪 德国节点", Filter: `🇩🇪|德国|Germany|GERMANY|\bDE(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|DEU|柏林|法兰克福|慕尼黑|Munich|MUC`},
 	{Name: "🇳🇱 荷兰节点", Filter: `🇳🇱|荷兰|Netherlands|NETHERLANDS|\bNL(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|NLD|阿姆斯特丹|AMS`},
 	{Name: "🇹🇷 土耳其节点", Filter: `🇹🇷|土耳其|Turkey|TURKEY|Türkiye|\bTR(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|TUR|IST|ANK`},
-	{Name: "🌐 其他地区", Filter: `(^(?!.*(港|\bHK(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|hk|Hong Kong|HongKong|hongkong|HONG KONG|HONGKONG|深港|HKG|🇭🇰|九龙|Kowloon|新界|沙田|荃湾|葵涌|美|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|纽约|纽纽|亚特兰大|迈阿密|华盛顿|\bUS(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|United States|UnitedStates|UNITED STATES|USA|America|AMERICA|JFK|EWR|IAD|ATL|ORD|MIA|NYC|LAX|SFO|SEA|DFW|SJC|🇺🇸|日本|川日|东京|大阪|泉日|埼玉|沪日|深日|(?<!尼|-)日|\bJP(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|Japan|JAPAN|JPN|NRT|HND|KIX|TYO|OSA|🇯🇵|关西|Kansai|KANSAI|新加坡|坡|狮城|\bSG(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|Singapore|SINGAPORE|SIN|🇸🇬|台|新北|彰化|\bTW(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|Taiwan|TAIWAN|TWN|TPE|ROC|🇹🇼|\bKR(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|Korea|KOREA|KOR|首尔|韩|韓|春川|Chuncheon|ICN|🇰🇷|加拿大|\bCA(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|Canada|CANADA|CAN|渥太华|温哥华|卡尔加里|蒙特利尔|Montreal|YVR|YYZ|YUL|🇨🇦|英国|Britain|United Kingdom|UNITED KINGDOM|England|伦敦|曼彻斯特|Manchester|\bUK(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|GBR|LHR|MAN|🇬🇧|法国|\bFR(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|France|FRANCE|FRA|巴黎|马赛|Marseille|CDG|MRS|🇫🇷|德国|Germany|GERMANY|\bDE(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|DEU|柏林|法兰克福|慕尼黑|Munich|MUC|🇩🇪|荷兰|Netherlands|NETHERLANDS|\bNL(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|NLD|阿姆斯特丹|AMS|🇳🇱|土耳其|Turkey|TURKEY|Türkiye|\bTR(?:[-_ ]?\d+(?:[-_ ]?[A-Za-z]{2,})?)?\b|TUR|IST|ANK|🇹🇷)).*)`},
 }
 
 // Special markers for proxy order
@@ -53,7 +65,7 @@ func GetRegionProxyGroupNames() []string {
 	for _, r := range RegionProxyGroups {
 		names = append(names, r.Name)
 	}
-	names = append(names, "🌐 其他地区")
+	names = append(names, OtherRegionsGroupName)
 	return names
 }
 
@@ -232,6 +244,11 @@ func (p *TemplateV3Processor) ProcessTemplate(templateContent string, proxies []
 			if proxyGroupsIndex >= 0 {
 				valueNode := rootMap.Content[proxyGroupsIndex]
 
+				// 先把 YAML 别名/合并键摊平成普通 mapping。必须赶在下面这些
+				// collect*/has* 之前做：它们（以及 processProxyGroups）都只认 MappingNode，
+				// 遇到 `- *anchor` 会连组名都收不到，整组无声蒸发。
+				p.normalizeGroupEntries(valueNode)
+
 				// Check if any proxy group has include-region-proxy-groups: true or __REGION_PROXY_GROUPS__ marker
 				if !addRegionProxyGroups {
 					addRegionProxyGroups = p.hasIncludeRegionProxyGroups(valueNode) || p.hasRegionProxyGroupsMarker(valueNode)
@@ -354,7 +371,7 @@ func (p *TemplateV3Processor) insertRegionProxyGroups(groupsNode *yaml.Node) {
 	}
 
 	// Create "Other regions" group with exclude filter
-	otherRegionNode := p.createRegionGroupNode("🌐 其他地区", "", GetOtherRegionsExcludeFilter())
+	otherRegionNode := p.createRegionGroupNode(OtherRegionsGroupName, "", GetOtherRegionsExcludeFilter())
 	newGroups = append(newGroups, otherRegionNode)
 
 	// Prepend new groups to existing groups
@@ -425,6 +442,130 @@ func (p *TemplateV3Processor) removeGlobalConfig(rootMap *yaml.Node, key string)
 	rootMap.Content = newContent
 }
 
+// normalizeGroupEntries 把 proxy-groups 里的每一条摊平成独立的 MappingNode：
+//   - `- *anchor`（整条是别名）→ 深拷贝锚点内容；
+//   - `<<: *anchor`（合并键）→ 就地展开成普通键值对。
+//
+// yaml.v3 只有在 Decode 进 struct/map 时才会处理这两种写法，我们全程操作 yaml.Node，
+// 不摊平就等于看不见锚点里的 name/type/proxies——组要么无声蒸发、要么被当成空组删掉。
+// 摊平的是拷贝，不动锚点本身（锚点可能还被别处引用），并清掉 Anchor 防止输出里出现重复锚点。
+func (p *TemplateV3Processor) normalizeGroupEntries(groupsNode *yaml.Node) {
+	if groupsNode == nil || groupsNode.Kind != yaml.SequenceNode {
+		return
+	}
+	for i, entry := range groupsNode.Content {
+		node := entry
+		if node.Kind == yaml.AliasNode {
+			target := derefAliasNode(node)
+			if target == nil || target.Kind != yaml.MappingNode {
+				// 解不了的别名（锚点缺失/不是 mapping）：原样留着并记日志，
+				// 至少不会让这一条凭空消失。
+				logger.Warn("[模板V3] proxy-groups 里有解不开的 YAML 别名，原样保留", "alias", node.Value)
+				continue
+			}
+			node = deepCopyYAMLNode(target)
+			node.Anchor = ""
+			logger.Info("[模板V3] proxy-groups 条目是 YAML 别名，已展开", "alias", entry.Value)
+		}
+		if node.Kind != yaml.MappingNode {
+			logger.Warn("[模板V3] proxy-groups 里有非 mapping 条目，原样保留", "kind", int(node.Kind))
+			continue
+		}
+		expandMergeKeys(node)
+		groupsNode.Content[i] = node
+	}
+}
+
+// derefAliasNode 顺着别名链找到真正的目标节点（别名指向别名的情况很少见，但不花钱）。
+func derefAliasNode(node *yaml.Node) *yaml.Node {
+	n := node
+	for i := 0; n != nil && n.Kind == yaml.AliasNode && i < 10; i++ {
+		n = n.Alias
+	}
+	if n != nil && n.Kind == yaml.AliasNode {
+		return nil
+	}
+	return n
+}
+
+// deepCopyYAMLNode 深拷贝一个 yaml 节点（锚点名清空由调用方决定）。
+func deepCopyYAMLNode(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	c := *n
+	c.Content = make([]*yaml.Node, 0, len(n.Content))
+	for _, child := range n.Content {
+		c.Content = append(c.Content, deepCopyYAMLNode(child))
+	}
+	return &c
+}
+
+// expandMergeKeys 就地展开 mapping 里的 `<<` 合并键。
+// 按 YAML 规范：本条目自己显式写的键优先，多个合并源之间先出现的优先。
+func expandMergeKeys(mapping *yaml.Node) {
+	hasMerge := false
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == "<<" {
+			hasMerge = true
+			break
+		}
+	}
+	if !hasMerge {
+		return
+	}
+
+	seen := make(map[string]bool)
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if key := mapping.Content[i].Value; key != "<<" {
+			seen[key] = true
+		}
+	}
+
+	var kept, merged []*yaml.Node
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key, value := mapping.Content[i], mapping.Content[i+1]
+		if key.Value != "<<" {
+			kept = append(kept, key, value)
+			continue
+		}
+		for _, src := range mergeSources(value) {
+			for j := 0; j+1 < len(src.Content); j += 2 {
+				name := src.Content[j].Value
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				mk := deepCopyYAMLNode(src.Content[j])
+				mv := deepCopyYAMLNode(src.Content[j+1])
+				mk.Anchor, mv.Anchor = "", ""
+				merged = append(merged, mk, mv)
+			}
+		}
+	}
+	mapping.Content = append(kept, merged...)
+}
+
+// mergeSources 解析 `<<` 的值：可以是别名、行内 mapping，或它们组成的序列。
+func mergeSources(value *yaml.Node) []*yaml.Node {
+	switch value.Kind {
+	case yaml.AliasNode:
+		if target := derefAliasNode(value); target != nil && target.Kind == yaml.MappingNode {
+			return []*yaml.Node{target}
+		}
+		logger.Warn("[模板V3] 合并键 << 指向的锚点解不开，已跳过", "alias", value.Value)
+	case yaml.MappingNode:
+		return []*yaml.Node{value}
+	case yaml.SequenceNode:
+		var sources []*yaml.Node
+		for _, item := range value.Content {
+			sources = append(sources, mergeSources(item)...)
+		}
+		return sources
+	}
+	return nil
+}
+
 // processProxyGroups processes all proxy groups in the template
 func (p *TemplateV3Processor) processProxyGroups(groupsNode *yaml.Node) error {
 	var newContent []*yaml.Node
@@ -432,22 +573,28 @@ func (p *TemplateV3Processor) processProxyGroups(groupsNode *yaml.Node) error {
 
 	// First pass: process each proxy group and identify empty ones
 	for _, groupNode := range groupsNode.Content {
-		if groupNode.Kind == yaml.MappingNode {
-			if err := p.processProxyGroup(groupNode); err != nil {
-				return err
-			}
-			// Check if proxies is empty after processing
-			if p.hasEmptyProxies(groupNode) {
-				// Record the removed group name
-				for i := 0; i < len(groupNode.Content); i += 2 {
-					if groupNode.Content[i].Value == "name" {
-						removedGroups[groupNode.Content[i+1].Value] = true
-						break
-					}
+		if groupNode.Kind != yaml.MappingNode {
+			// normalizeGroupEntries 已经尽力摊平过了，走到这里说明这条既不是 mapping
+			// 也解不成 mapping。原样带出去交给客户端判断，总好过静默吞掉一整条。
+			newContent = append(newContent, groupNode)
+			continue
+		}
+		if err := p.processProxyGroup(groupNode); err != nil {
+			return err
+		}
+		// Check if proxies is empty after processing
+		if p.hasEmptyProxies(groupNode) {
+			// Record the removed group name
+			for i := 0; i < len(groupNode.Content); i += 2 {
+				if groupNode.Content[i].Value == "name" {
+					name := groupNode.Content[i+1].Value
+					removedGroups[name] = true
+					logger.Info("[模板V3] 代理组成员为空，已删除", "group", name)
+					break
 				}
-			} else {
-				newContent = append(newContent, groupNode)
 			}
+		} else {
+			newContent = append(newContent, groupNode)
 		}
 	}
 
@@ -455,6 +602,10 @@ func (p *TemplateV3Processor) processProxyGroups(groupsNode *yaml.Node) error {
 	if len(removedGroups) > 0 {
 		for _, groupNode := range newContent {
 			p.removeGroupReferences(groupNode, removedGroups)
+			// 删引用可能把组掏空。`proxies: []` 会让 mihomo/Loon 直接拒载整份配置，
+			// 所以这里不再复查一遍"空了就删"（那会连锁删组、把 rules 指向的策略也删没），
+			// 而是塞一个 DIRECT 兜底——跟 Loon 转换层同一个约定：组还在，规则还能解析。
+			p.ensureNonEmptyProxies(groupNode)
 		}
 		// Update proxy group names list
 		p.proxyGroups = p.filterProxyGroupNames(p.proxyGroups, removedGroups)
@@ -462,6 +613,35 @@ func (p *TemplateV3Processor) processProxyGroups(groupsNode *yaml.Node) error {
 
 	groupsNode.Content = newContent
 	return nil
+}
+
+// ensureNonEmptyProxies 保证组的 proxies 至少有一个成员（空则补 DIRECT）。
+func (p *TemplateV3Processor) ensureNonEmptyProxies(groupNode *yaml.Node) {
+	if groupNode.Kind != yaml.MappingNode {
+		return
+	}
+	var name string
+	for i := 0; i+1 < len(groupNode.Content); i += 2 {
+		if groupNode.Content[i].Value == "name" {
+			name = groupNode.Content[i+1].Value
+			break
+		}
+	}
+	for i := 0; i+1 < len(groupNode.Content); i += 2 {
+		if groupNode.Content[i].Value != "proxies" {
+			continue
+		}
+		proxiesNode := groupNode.Content[i+1]
+		if proxiesNode.Kind == yaml.SequenceNode && len(proxiesNode.Content) == 0 {
+			proxiesNode.Content = append(proxiesNode.Content, &yaml.Node{
+				Kind:  yaml.ScalarNode,
+				Tag:   "!!str",
+				Value: "DIRECT",
+			})
+			logger.Warn("[模板V3] 代理组引用的组都被删了，补 DIRECT 兜底以免产出 proxies: []", "group", name)
+		}
+		return
+	}
 }
 
 // removeGroupReferences removes references to removed groups from a proxy group's proxies list
@@ -495,6 +675,12 @@ func (p *TemplateV3Processor) filterProxyGroupNames(names []string, removedGroup
 }
 
 // hasEmptyProxies checks if a proxy group has empty or no proxies
+//
+// 只在 processProxyGroup 之后调用，那时 updateProxiesInNode 一定已经写好了 proxies 键
+// （有成员写成员、没成员写空序列），所以"判空"实际只看空序列这一种情况。
+// 没有 proxies 键 = 这个组根本没被处理过（比如以后有人挪了调用顺序），
+// 这种情况按 mihomo 语义（只写 use:/include-all 的组是合法的）保留，不能当空组删——
+// 删组的代价是 rules 里指向它的规则全成悬空引用，比多留一个组严重得多。
 func (p *TemplateV3Processor) hasEmptyProxies(groupNode *yaml.Node) bool {
 	for i := 0; i < len(groupNode.Content); i += 2 {
 		if groupNode.Content[i].Value == "proxies" {
@@ -502,8 +688,7 @@ func (p *TemplateV3Processor) hasEmptyProxies(groupNode *yaml.Node) bool {
 			return valueNode.Kind == yaml.SequenceNode && len(valueNode.Content) == 0
 		}
 	}
-	// No proxies field found, treat as empty
-	return true
+	return false
 }
 
 // processProxyGroup processes a single proxy group
@@ -528,7 +713,14 @@ func (p *TemplateV3Processor) parseProxyGroup(groupNode *yaml.Node) ProxyGroupV3
 
 	for i := 0; i < len(groupNode.Content); i += 2 {
 		key := groupNode.Content[i].Value
+		// 值也可能是别名（`proxies: *common_nodes`）。不解引用的话别名节点的 Value
+		// 是锚点名、Content 是空的，组就会被算成"没有成员"而删掉。
 		valueNode := groupNode.Content[i+1]
+		if valueNode.Kind == yaml.AliasNode {
+			if target := derefAliasNode(valueNode); target != nil {
+				valueNode = target
+			}
+		}
 
 		switch key {
 		case "name":
@@ -600,7 +792,23 @@ func (p *TemplateV3Processor) calculateProxies(group ProxyGroupV3) []string {
 	proxyNodes := p.calculateProxyNodes(group)
 
 	// Calculate proxy providers (from use, include-all-providers)
-	proxyProviders := p.calculateProxyProviders(group)
+	proxyProviders, providersRequested, missingProviders := p.calculateProxyProviders(group)
+
+	// 假空兜底：主控侧 5 个调用点（subscription.go / packages.go / template_v3.go /
+	// package_subscribe.go ×2）全都是 NewTemplateV3Processor(nil, nil)，providers 恒为 nil，
+	// 模板里的 proxy-providers 从来没被读进来过。于是「只靠 use: / include-all-providers
+	// 取成员」的组会一个成员都凑不出来，随后被当空组删掉——组一没，rules 里指向它的规则
+	// 就成了悬空引用。这里在"声明了要用代理集合、却连一个成员都凑不出来"时退回当前节点池，
+	// 让组保持可用（filter/exclude-filter 随后照常生效）。
+	// 只在真的凑不出成员时才兜底：组里本来就有显式成员或节点的，一个都不多给。
+	if providersRequested && len(proxyProviders) == 0 && len(proxyNodes) == 0 && !hasExplicitMembers(group.Proxies) {
+		for _, proxy := range p.allProxies {
+			proxyProviders = append(proxyProviders, proxy.Name)
+		}
+		logger.Warn("[模板V3] 代理集合(proxy-providers)解析不到，已用当前节点池兜底以免整组消失",
+			"group", group.Name, "use", strings.Join(group.Use, ","),
+			"missing", strings.Join(missingProviders, ","), "fallback", len(proxyProviders))
+	}
 
 	// Check if proxies list contains markers
 	hasNodesMarker := false
@@ -643,12 +851,12 @@ func (p *TemplateV3Processor) calculateProxies(group ProxyGroupV3) []string {
 
 	// Apply filter (include matching) - only to proxy nodes, not to proxy groups
 	if group.Filter != "" {
-		result = applyFilterPreservingGroups(result, group.Filter, p.proxyGroups)
+		result = applyFilterPreservingGroups(group.Name, result, group.Filter, p.proxyGroups)
 	}
 
 	// Apply exclude-filter (exclude matching)
 	if group.ExcludeFilter != "" {
-		result = applyExcludeFilter(result, group.ExcludeFilter)
+		result = applyExcludeFilterForGroup(group.Name, result, group.ExcludeFilter)
 	}
 
 	// Apply exclude-type
@@ -702,27 +910,200 @@ func (p *TemplateV3Processor) calculateProxyNodes(group ProxyGroupV3) []string {
 }
 
 // calculateProxyProviders calculates proxy providers from include options
-func (p *TemplateV3Processor) calculateProxyProviders(group ProxyGroupV3) []string {
-	var providers []string
-
+//
+// 返回值：解析出来的成员、是否声明过要用代理集合、以及哪些集合名没解析到。
+// 后两个给 calculateProxies 判"要不要走假空兜底"用。
+func (p *TemplateV3Processor) calculateProxyProviders(group ProxyGroupV3) (providers []string, requested bool, missing []string) {
 	if group.IncludeAll || group.IncludeAllProviders {
+		requested = true
 		for _, providerProxies := range p.providers {
 			providers = append(providers, providerProxies...)
 		}
 	} else if len(group.Use) > 0 {
+		requested = true
 		for _, providerName := range group.Use {
 			if providerProxies, ok := p.providers[providerName]; ok {
 				providers = append(providers, providerProxies...)
+			} else {
+				missing = append(missing, providerName)
 			}
 		}
 	}
 
-	return providers
+	return providers, requested, missing
+}
+
+// hasExplicitMembers 判断 proxies 里除了占位符之外还有没有真成员
+func hasExplicitMembers(proxies []string) bool {
+	for _, name := range proxies {
+		switch name {
+		case ProxyNodesMarker, ProxyProvidersMarker, RegionProxyGroupsMarker, "":
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// groupPatternMatcher 是 filter / exclude-filter 里**单条**正则编译出来的匹配器。
+//
+// 为什么要包一层：模板作者写的是 mihomo 那套正则（支持先行/后行断言），而 Go 用的是
+// RE2，(?=...) / (?!...) 一律编译失败。老代码在编译失败时直接 `err == nil && matched`
+// 吞掉错误，等价于"这条正则谁都匹配不上"——放在 filter 上就是**全员淘汰**，整个代理组
+// 成员为空，紧接着被 processProxyGroups 当空组删掉（用户 44 个组只剩 25 个的头号成因）。
+type groupPatternMatcher struct {
+	re     *regexp.Regexp // nil 表示恒定结果（编译失败后的降级）
+	negate bool           // 由负向先行断言改写而来：命中 re 反而意味着"不匹配"
+	fixed  bool           // re == nil 时的恒定返回值
+}
+
+func (m groupPatternMatcher) match(name string) bool {
+	if m.re == nil {
+		return m.fixed
+	}
+	if m.negate {
+		return !m.re.MatchString(name)
+	}
+	return m.re.MatchString(name)
+}
+
+// compileGroupPatterns 编译一条 filter / exclude-filter（反引号可分隔多条子正则）。
+//
+// failOpen 决定"这条子正则 RE2 编译不出来"时往哪边降级：
+//   - filter（failOpen=true）→ 该子正则视为**全部命中**，即不过滤，保留全部候选成员；
+//   - exclude-filter（failOpen=false）→ 该子正则视为**全部不命中**，即不排除任何成员。
+//
+// 两个方向都往"多给几个节点"偏：宁可组里多几个本不该有的节点（用户看得见、能自己挑），
+// 也不能让整个策略组凭空消失——组一旦没了，rules 里指向它的规则全成悬空引用，
+// 客户端要么拒载整份配置，要么把流量悄悄丢给别的策略。
+func compileGroupPatterns(groupName, field, patternText string, failOpen bool) []groupPatternMatcher {
+	parts := strings.Split(patternText, "`")
+	matchers := make([]groupPatternMatcher, 0, len(parts))
+	for _, pattern := range parts {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if re, err := compileCompatibleRegex(pattern); err == nil {
+			matchers = append(matchers, groupPatternMatcher{re: re})
+			continue
+		}
+		// 编译失败先别急着降级：最常见的就是"锚在开头的负向先行断言"，
+		// 它能保守地改写成"先全匹配、再按内层正则排除"，语义完全等价。
+		if body, ok := rewriteNegativeLookaheadToExclusion(pattern); ok {
+			if re, err := compileCompatibleRegex(body); err == nil {
+				logger.Info("[模板V3] 正则含负向先行断言，已改写成等价的排除匹配",
+					"group", groupName, "field", field, "pattern", pattern, "exclude", body)
+				matchers = append(matchers, groupPatternMatcher{re: re, negate: true})
+				continue
+			}
+		}
+		logger.Warn("[模板V3] 正则 RE2 编译失败，已降级（filter=不过滤 / exclude-filter=不排除），宁可多给节点也不删组",
+			"group", groupName, "field", field, "pattern", pattern)
+		matchers = append(matchers, groupPatternMatcher{fixed: failOpen})
+	}
+	return matchers
+}
+
+// rewriteNegativeLookaheadToExclusion 把「整条正则 = 锚在开头的负向先行断言」保守改写成
+// 一条"排除用"正则 body：原正则命中 ⇔ body 不命中。只认两种最常见的写法：
+//
+//	^((?!X).)*$  —— 任何位置都不以 X 开头，即"整串不含 X"
+//	^(?!X)REST   —— REST 为空或 .* / .+ 时，即"开头不匹配 X"（X 以 .* 打头时同样是"不含 X"）
+//
+// 认不出来就返回 false，交给调用方走降级分支——不硬猜语义，猜错比降级更难排查。
+func rewriteNegativeLookaheadToExclusion(pattern string) (string, bool) {
+	p := stripRedundantOuterParens(strings.TrimSpace(pattern))
+
+	// 形态一：^((?!X).)*$
+	if strings.HasPrefix(p, "^((?!") {
+		if end := matchingParen(p, 2); end > 0 && p[end+1:] == ".)*$" {
+			return trimLeadingMatchAll(p[len("^((?!"):end]), true
+		}
+	}
+
+	// 形态二：^(?!X)REST
+	if strings.HasPrefix(p, "^(?!") {
+		if end := matchingParen(p, 1); end > 0 {
+			body := p[len("^(?!"):end]
+			switch p[end+1:] {
+			case "", "$", ".*", ".*$", ".+", ".+$":
+				if strings.HasPrefix(body, ".*") {
+					return trimLeadingMatchAll(body), true
+				}
+				// 没有 .* 前缀 = 只断言开头，补回 ^ 保持锚定
+				return "^(?:" + body + ")", true
+			}
+		}
+	}
+
+	return "", false
+}
+
+// trimLeadingMatchAll 把 ".*X" 这种"任意前缀 + X"的断言体降成 X：
+// RE2 的 MatchString 本来就是无锚搜索，留着 .* 只是白白拖慢匹配。
+func trimLeadingMatchAll(body string) string {
+	trimmed := strings.TrimPrefix(body, ".*")
+	if trimmed == body {
+		return body
+	}
+	trimmed = strings.TrimPrefix(trimmed, "?") // .*? 非贪婪写法
+	if trimmed == "" {
+		return body
+	}
+	return trimmed
+}
+
+// matchingParen 返回 s[open] 这个 '(' 对应的 ')' 下标，找不到返回 -1。
+// 会跳过转义字符和字符组 [...] 里的括号。
+func matchingParen(s string, open int) int {
+	if open >= len(s) || s[open] != '(' {
+		return -1
+	}
+	depth := 0
+	inClass := false
+	for i := open; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\\':
+			i++ // 跳过被转义的下一个字节
+		case inClass:
+			if c == ']' {
+				inClass = false
+			}
+		case c == '[':
+			inClass = true
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// stripRedundantOuterParens 脱掉整体包裹的普通括号（模板里常见 `(^(?!...).*)` 这种写法）。
+// (?: / (?! 这类特殊组一律不动。
+func stripRedundantOuterParens(p string) string {
+	for len(p) > 2 && p[0] == '(' && p[1] != '?' {
+		if matchingParen(p, 0) != len(p)-1 {
+			return p
+		}
+		p = p[1 : len(p)-1]
+	}
+	return p
 }
 
 // applyFilterPreservingGroups applies filter but preserves proxy group names
-func applyFilterPreservingGroups(proxies []string, filterPattern string, proxyGroups []string) []string {
-	patterns := strings.Split(filterPattern, "`")
+func applyFilterPreservingGroups(groupName string, proxies []string, filterPattern string, proxyGroups []string) []string {
+	matchers := compileGroupPatterns(groupName, "filter", filterPattern, true)
+	if len(matchers) == 0 {
+		// 没有任何可用的子正则（整条都是空白）→ 当作没写 filter，不能反过来把成员筛没
+		return proxies
+	}
+
 	groupSet := make(map[string]bool)
 	for _, g := range proxyGroups {
 		groupSet[g] = true
@@ -737,13 +1118,8 @@ func applyFilterPreservingGroups(proxies []string, filterPattern string, proxyGr
 		}
 
 		// Apply filter to non-group proxies
-		for _, pattern := range patterns {
-			pattern = strings.TrimSpace(pattern)
-			if pattern == "" {
-				continue
-			}
-			matched, err := matchCompatibleRegex(pattern, proxyName)
-			if err == nil && matched {
+		for _, m := range matchers {
+			if m.match(proxyName) {
 				result = append(result, proxyName)
 				break
 			}
@@ -890,18 +1266,19 @@ func containsType(types []string, proxyType string) bool {
 }
 
 func applyFilter(proxies []string, filterPattern string) []string {
-	// Filter pattern can contain multiple patterns separated by backtick
-	patterns := strings.Split(filterPattern, "`")
+	return applyFilterForGroup("", proxies, filterPattern)
+}
+
+func applyFilterForGroup(groupName string, proxies []string, filterPattern string) []string {
+	matchers := compileGroupPatterns(groupName, "filter", filterPattern, true)
+	if len(matchers) == 0 {
+		return proxies
+	}
 
 	var result []string
 	for _, proxyName := range proxies {
-		for _, pattern := range patterns {
-			pattern = strings.TrimSpace(pattern)
-			if pattern == "" {
-				continue
-			}
-			matched, err := matchCompatibleRegex(pattern, proxyName)
-			if err == nil && matched {
+		for _, m := range matchers {
+			if m.match(proxyName) {
 				result = append(result, proxyName)
 				break
 			}
@@ -911,19 +1288,18 @@ func applyFilter(proxies []string, filterPattern string) []string {
 }
 
 func applyExcludeFilter(proxies []string, excludePattern string) []string {
-	// Exclude pattern can contain multiple patterns separated by backtick
-	patterns := strings.Split(excludePattern, "`")
+	return applyExcludeFilterForGroup("", proxies, excludePattern)
+}
+
+func applyExcludeFilterForGroup(groupName string, proxies []string, excludePattern string) []string {
+	// 编译失败的子正则按"谁都排不掉"处理（failOpen=false），即宁可把节点留在组里
+	matchers := compileGroupPatterns(groupName, "exclude-filter", excludePattern, false)
 
 	var result []string
 	for _, proxyName := range proxies {
 		excluded := false
-		for _, pattern := range patterns {
-			pattern = strings.TrimSpace(pattern)
-			if pattern == "" {
-				continue
-			}
-			matched, err := matchCompatibleRegex(pattern, proxyName)
-			if err == nil && matched {
+		for _, m := range matchers {
+			if m.match(proxyName) {
 				excluded = true
 				break
 			}
