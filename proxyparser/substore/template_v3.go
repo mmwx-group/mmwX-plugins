@@ -1096,7 +1096,36 @@ func stripRedundantOuterParens(p string) string {
 	return p
 }
 
+// builtInOutbounds 是 mihomo/clash 自带的出站名。它们不是代理节点，
+// 不在 proxies: 列表里，也永远不会匹配按节点名写的正则。
+var builtInOutbounds = map[string]bool{
+	"DIRECT":      true,
+	"REJECT":      true,
+	"REJECT-DROP": true,
+	"PASS":        true,
+	"GLOBAL":      true,
+	"COMPATIBLE":  true,
+}
+
+// isBuiltInOutbound 判断一个组成员是不是内核内置出站。
+func isBuiltInOutbound(name string) bool { return builtInOutbounds[name] }
+
 // applyFilterPreservingGroups applies filter but preserves proxy group names
+// and built-in outbounds.
+//
+// filter 是**按节点名**写的正则（"香港|HK"、"IPLC" 之类），用来从注入的节点里挑一批。
+// 代理组名早就被豁免了（下面的 groupSet），但**内置出站漏了**：用户在模板里写
+//
+//	proxies: [DIRECT, REJECT, 香港01, ...]
+//	filter: "香港"
+//
+// DIRECT / REJECT 匹配不上 "香港"，于是被当成"没选中的节点"一起筛掉 ——
+// 用户明明在模板里显式配了这两个内置出站，产出的组里却没有。
+// 它们压根不是节点（不在 proxies: 里、没有 type），拿节点名的正则去筛本身就不成立。
+//
+// 注意这条豁免**只给 filter，不给 exclude-filter**：exclude-filter 是"匹配上就删"，
+// 用户写 exclude-filter: "DIRECT" 就是明确要删掉它，那是主动行为，不该被拦。
+// 这里的问题恰恰相反 —— 是"没匹配上"被误伤。
 func applyFilterPreservingGroups(groupName string, proxies []string, filterPattern string, proxyGroups []string) []string {
 	matchers := compileGroupPatterns(groupName, "filter", filterPattern, true)
 	if len(matchers) == 0 {
@@ -1111,8 +1140,8 @@ func applyFilterPreservingGroups(groupName string, proxies []string, filterPatte
 
 	var result []string
 	for _, proxyName := range proxies {
-		// Always keep proxy groups
-		if groupSet[proxyName] {
+		// Always keep proxy groups and built-in outbounds
+		if groupSet[proxyName] || isBuiltInOutbound(proxyName) {
 			result = append(result, proxyName)
 			continue
 		}
