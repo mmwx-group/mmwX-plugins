@@ -352,6 +352,13 @@ func (p *SurgeProducer) snell(proxy Proxy) (string, error) {
 
 	result.AppendIfPresent(`,version=%d`, "version")
 	result.AppendIfPresent(`,psk=%s`, "psk")
+	// Snell v6 的传输模式(default / unshaped / unsafe-raw)。**只有 v6 有这个参数** ——
+	// 与 Sub-Store 上游一致(`if (Number(proxy.version) === 6)`)。v4/v5 的 mode 在
+	// obfs-opts.mode 里、含义是混淆方式,把它输出到顶层是另一回事。
+	// 漏掉时 Surge 只能按默认的 default 跑,用户在面板里选的 unshaped 不生效。
+	if GetInt(proxy, "version") == 6 {
+		result.AppendIfPresent(`,mode=%s`, "mode")
+	}
 	p.appendIPVersion(result, proxy)
 	p.appendCommonOptions(result, proxy)
 
