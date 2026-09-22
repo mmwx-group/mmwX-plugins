@@ -1263,14 +1263,15 @@ func (p *EgernProducer) transformWireGuard(proxy, _ Proxy) Proxy {
 		}
 	}
 
-	if IsPresent(proxy, "mtu") {
-		result["mtu"] = GetInt(proxy, "mtu")
+	// mtu / keepalive 只在 >0 时输出,0 写出去没有意义(与 clash 系 producer 口径一致)
+	if mtu := GetInt(proxy, "mtu"); mtu > 0 {
+		result["mtu"] = mtu
 	}
 	// keepalive:兼容 Clash-meta 的 persistent-keepalive 写法
-	if IsPresent(proxy, "keepalive") {
-		result["keepalive"] = GetInt(proxy, "keepalive")
-	} else if IsPresent(proxy, "persistent-keepalive") {
-		result["keepalive"] = GetInt(proxy, "persistent-keepalive")
+	if keepalive := GetInt(proxy, "keepalive"); keepalive > 0 {
+		result["keepalive"] = keepalive
+	} else if keepalive := GetInt(proxy, "persistent-keepalive"); keepalive > 0 {
+		result["keepalive"] = keepalive
 	}
 
 	return result

@@ -608,11 +608,21 @@ func (p *LoonProducer) wireguard(proxy Proxy) (string, error) {
 	result := NewResult(proxy)
 	result.Append(fmt.Sprintf("%s=wireguard", GetString(proxy, "name")))
 
-	result.AppendIfPresent(",interface-ip=%s", "ip")
-	result.AppendIfPresent(",interface-ipv6=%s", "ipv6")
+	// 可选字段只在非空 / 非零时输出:peers 覆盖会把缺失的 ip/ipv6 写成 nil,
+	// 空串或 0 写出去就是 interface-ipv6= / mtu=0 这种坏值。
+	if ip := GetString(proxy, "ip"); ip != "" {
+		result.Append(fmt.Sprintf(",interface-ip=%s", ip))
+	}
+	if ipv6 := GetString(proxy, "ipv6"); ipv6 != "" {
+		result.Append(fmt.Sprintf(",interface-ipv6=%s", ipv6))
+	}
 
-	result.AppendIfPresent(",private-key=\"%s\"", "private-key")
-	result.AppendIfPresent(",mtu=%d", "mtu")
+	if privateKey := GetString(proxy, "private-key"); privateKey != "" {
+		result.Append(fmt.Sprintf(",private-key=\"%s\"", privateKey))
+	}
+	if mtu := GetInt(proxy, "mtu"); mtu > 0 {
+		result.Append(fmt.Sprintf(",mtu=%d", mtu))
+	}
 
 	// DNS handling
 	if IsPresent(proxy, "dns") {
@@ -645,20 +655,20 @@ func (p *LoonProducer) wireguard(proxy Proxy) (string, error) {
 	result.AppendIfPresent(",dns=%s", "dns")
 	result.AppendIfPresent(",dnsv6=%s", "dnsv6")
 
-	// keepalive
-	result.AppendIfPresent(",keepalive=%d", "persistent-keepalive")
-	result.AppendIfPresent(",keepalive=%d", "keepalive")
+	// keepalive:两种写法只输出一次,且只在 >0 时输出(以前两个都在时会写出两个 keepalive=,0 也照写)
+	if keepalive := wireGuardKeepalive(proxy); keepalive > 0 {
+		result.Append(fmt.Sprintf(",keepalive=%d", keepalive))
+	}
 
-	// allowed-ips
-	allowedIps := "0.0.0.0/0,::/0"
-	if ips, ok := proxy["allowed-ips"].([]interface{}); ok {
-		var ipStrs []string
-		for _, ip := range ips {
-			ipStrs = append(ipStrs, fmt.Sprintf("%v", ip))
-		}
-		allowedIps = strings.Join(ipStrs, ",")
-	} else if ips, ok := proxy["allowed-ips"].(string); ok && ips != "" {
-		allowedIps = ips
+	// allowed-ips:显式配置优先;没配时默认只走 v4,有隧道 v6 地址才加 ::/0。
+	// 以前默认无条件带 ::/0,主控对只有 v4 的服务器不下发 ipv6 后,v6 流量会被导进
+	// 一个没有 v6 地址的隧道里(与 sing-box 的默认值口径一致)。
+	allowedIps := "0.0.0.0/0"
+	if GetString(proxy, "ipv6") != "" {
+		allowedIps = "0.0.0.0/0,::/0"
+	}
+	if ips := wireGuardStringList(proxy["allowed-ips"]); len(ips) > 0 {
+		allowedIps = strings.Join(ips, ",")
 	}
 
 	// reserved
