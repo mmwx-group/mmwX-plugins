@@ -39,24 +39,37 @@ func (p *SurgeProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 		opts = &ProduceOptions{}
 	}
 
-	var result []string
+	// 先记下实际输出了哪些节点:dialer-proxy 指向被跳过的节点(WG / VLESS 等)时,
+	// underlying-proxy 就是悬空引用,Surge 拒载。口径同 policy_prune.go:只认「输入里有、
+	// 却没输出」的名字,不认识的名字(模板里的策略组)原样保留。
+	type surgeLine struct{ line, dialer string }
+	var produced []surgeLine
+	inputNames := make([]string, 0, len(proxies))
+	outputNames := make(map[string]bool, len(proxies))
 	for _, proxy := range proxies {
+		// 取原名:ProduceOne 会清洗名字里的 = 和 ,,dialer-proxy 引用的是原名
+		name := GetString(proxy, "name")
+		inputNames = append(inputNames, name)
 		line, err := p.ProduceOne(proxy, outputType, opts)
+		if err != nil && !opts.IncludeUnsupportedProxy {
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		outputNames[name] = true
+		produced = append(produced, surgeLine{line: line, dialer: GetString(proxy, "dialer-proxy")})
+	}
+	pruned := prunePolicyGroups(nil, inputNames, outputNames)
 
+	var result []string
+	for _, l := range produced {
+		line := l.line
 		// convert dailer-proxy to underlying-proxy
-		dailerProxy := GetString(proxy, "dialer-proxy")
-		if dailerProxy != "" {
-			line += fmt.Sprintf(", underlying-proxy=%s", dailerProxy)
+		if l.dialer != "" && !pruned.Dangling(l.dialer) {
+			line += fmt.Sprintf(", underlying-proxy=%s", l.dialer)
 		}
-
-		if err != nil {
-			if !opts.IncludeUnsupportedProxy {
-				continue
-			}
-		}
-		if line != "" {
-			result = append(result, line)
-		}
+		result = append(result, line)
 	}
 
 	if outputType == "internal" {

@@ -65,3 +65,46 @@ func TestSurfboardSkipsAnyUnsupportedProxy(t *testing.T) {
 		}
 	}
 }
+
+// t=surge 走 Produce:dialer-proxy 指向没输出的节点(WG / VLESS 等)时不能写 underlying-proxy,
+// 否则 [Proxy] 里引用一个不存在的策略,Surge 拒载。指向已输出节点或不认识的名字(模板里的
+// 策略组)照常写。
+func TestSurgeProduceDropsDanglingUnderlyingProxy(t *testing.T) {
+	trojan := func(name, dialer string) Proxy {
+		p := Proxy{"name": name, "type": "trojan", "server": "5.6.7.8", "port": 443, "password": "pw"}
+		if dialer != "" {
+			p["dialer-proxy"] = dialer
+		}
+		return p
+	}
+	proxies := []Proxy{
+		masterWireGuardProxy(),
+		{"name": "vl", "type": "vless", "server": "5.6.7.8", "port": 443, "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+		trojan("via-wg", "wg-in"),
+		trojan("via-vl", "vl"),
+		trojan("relay", ""),
+		trojan("via-relay", "relay"),
+		trojan("via-group", "RELAY-GROUP"),
+	}
+	out, err := NewSurgeProducer().Produce(proxies, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out.(string)), "\n") {
+		lines[strings.SplitN(line, "=", 2)[0]] = line
+	}
+	if len(lines) != 5 {
+		t.Fatalf("应输出 5 个 trojan 节点,得到:\n%s", out)
+	}
+	for name, want := range map[string]string{"via-wg": "", "via-vl": "", "relay": "", "via-relay": "relay", "via-group": "RELAY-GROUP"} {
+		line := lines[name]
+		has := strings.Contains(line, "underlying-proxy")
+		if want == "" && has {
+			t.Errorf("%s 不应带悬空的 underlying-proxy:\n%s", name, line)
+		}
+		if want != "" && !strings.HasSuffix(line, ", underlying-proxy="+want) {
+			t.Errorf("%s 应带 underlying-proxy=%s:\n%s", name, want, line)
+		}
+	}
+}
