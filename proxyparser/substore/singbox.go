@@ -158,7 +158,11 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 		}
 
 		if parsed != nil {
-			p.passthroughExtraFields(proxy, parsed)
+			// WG endpoint 不透传:它的字段集合和出站完全不同(见 singboxWireGuardEndpointKeys),
+			// 导入节点里认不出的参数一旦透传,官方 sing-box 会整份拒载。
+			if proxyType != "wireguard" {
+				p.passthroughExtraFields(proxy, parsed)
+			}
 			list = append(list, parsed)
 		}
 	}
@@ -1820,7 +1824,8 @@ func (p *SingboxProducer) wireguardParser(proxy Proxy) (map[string]interface{}, 
 
 	// Ensure peers exist
 	peersSlice, _ := proxy["peers"].([]interface{})
-	if len(peersSlice) == 0 {
+	singlePeer := len(peersSlice) == 0
+	if singlePeer {
 		peersSlice = []interface{}{map[string]interface{}{}}
 	}
 
@@ -1860,6 +1865,10 @@ func (p *SingboxProducer) wireguardParser(proxy Proxy) (map[string]interface{}, 
 		if allowedIPs == nil {
 			allowedIPs = GetStringSlice(peerMap, "allowed_ips")
 		}
+		if allowedIPs == nil && singlePeer {
+			// 单 peer 写法(mihomo 顶层字段)的 allowed-ips 也在顶层,以前被忽略、一律回落默认值
+			allowedIPs = wireGuardStringList(proxy["allowed-ips"])
+		}
 		if allowedIPs == nil {
 			allowedIPs = []string{"0.0.0.0/0"}
 			if GetString(proxy, "ipv6") != "" {
@@ -1877,7 +1886,14 @@ func (p *SingboxProducer) wireguardParser(proxy Proxy) (map[string]interface{}, 
 			peer["pre_shared_key"] = preSharedKey
 		}
 
-		if keepalive := GetInt(peerMap, "persistent-keepalive-interval"); keepalive > 0 {
+		// 保活:peer 自己的 persistent-keepalive-interval 优先,否则用顶层
+		// persistent-keepalive / keepalive(mihomo 的顶层值对所有 peer 生效)。
+		// sing-box 只在 peers[].persistent_keepalive_interval 认这个值(uint16),顶层没有对应字段。
+		keepalive := GetInt(peerMap, "persistent-keepalive-interval")
+		if keepalive <= 0 {
+			keepalive = wireGuardKeepalive(proxy)
+		}
+		if keepalive > 0 && keepalive <= 65535 {
 			peer["persistent_keepalive_interval"] = keepalive
 		}
 
@@ -1893,19 +1909,42 @@ func (p *SingboxProducer) wireguardParser(proxy Proxy) (map[string]interface{}, 
 	}
 	parsed["peers"] = peers
 
-	p.networkParser(proxy, parsed)
 	p.tfoParser(proxy, parsed)
 	p.detourParser(proxy, parsed)
-	p.smuxParser(proxy, parsed)
 	p.ipVersionParser(proxy, parsed)
+	p.domainResolverParser(proxy, parsed)
 
-	delete(parsed, "server")
-	delete(parsed, "server_port")
-	delete(parsed, "pre_shared_key")
-	delete(parsed, "peer_public_key")
-	delete(parsed, "reserved")
+	// 只留 sing-box WG endpoint 认识的字段。旧的 server/server_port/peer_public_key/
+	// pre_shared_key/reserved(出站写法,1.13 起已移除)、network、multiplex 都不在其中,
+	// 写出去官方 sing-box 会整份拒载。
+	for key := range parsed {
+		if !singboxWireGuardEndpointKeys[key] {
+			delete(parsed, key)
+		}
+	}
 
 	return parsed, nil
+}
+
+// singboxWireGuardEndpointKeys 是 sing-box WireGuard endpoint 允许的全部顶层字段:
+// Endpoint 的 type/tag + WireGuardEndpointOptions + DialerOptions
+// (sing-box option/endpoint.go、option/wireguard.go、option/outbound.go 的 DialerOptions)。
+// peers[] 的字段由 wireguardParser 逐个显式构造,只有 address/port/public_key/
+// pre_shared_key/allowed_ips/persistent_keepalive_interval/reserved。
+var singboxWireGuardEndpointKeys = map[string]bool{
+	// Endpoint
+	"type": true, "tag": true,
+	// WireGuardEndpointOptions
+	"system": true, "name": true, "mtu": true, "address": true, "private_key": true,
+	"listen_port": true, "peers": true, "udp_timeout": true, "udp_mapping": true,
+	"udp_filtering": true, "udp_nat_max": true, "workers": true,
+	// DialerOptions
+	"detour": true, "bind_interface": true, "inet4_bind_address": true, "inet6_bind_address": true,
+	"bind_address_no_port": true, "protect_path": true, "routing_mark": true, "reuse_addr": true,
+	"netns": true, "connect_timeout": true, "tcp_fast_open": true, "tcp_multi_path": true,
+	"disable_tcp_keep_alive": true, "tcp_keep_alive": true, "tcp_keep_alive_interval": true,
+	"udp_fragment": true, "domain_resolver": true, "network_strategy": true, "network_type": true,
+	"fallback_network_type": true, "fallback_delay": true, "domain_strategy": true,
 }
 
 func parseReserved(reserved interface{}) interface{} {

@@ -212,21 +212,8 @@ func (p *ClashMetaProducer) Produce(proxies []Proxy, outputType string, opts *Pr
 			}
 
 		case "wireguard":
-			// WireGuard keepalive
-			if !IsPresent(transformed, "keepalive") {
-				if IsPresent(transformed, "persistent-keepalive") {
-					transformed["keepalive"] = GetInt(transformed, "persistent-keepalive")
-				}
-			}
-			transformed["persistent-keepalive"] = GetInt(transformed, "keepalive")
-
-			// preshared-key
-			if !IsPresent(transformed, "preshared-key") {
-				if IsPresent(transformed, "pre-shared-key") {
-					transformed["preshared-key"] = GetString(transformed, "pre-shared-key")
-				}
-			}
-			transformed["pre-shared-key"] = GetString(transformed, "preshared-key")
+			// keepalive / preshared-key 两种写法互为别名,只在非零 / 非空时输出(见 normalizeWireGuardOptionalFields)
+			normalizeWireGuardOptionalFields(transformed)
 
 			// allowed-ips: 确保是数组类型
 			if IsPresent(transformed, "allowed-ips") {

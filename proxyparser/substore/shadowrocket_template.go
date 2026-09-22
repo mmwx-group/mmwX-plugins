@@ -725,17 +725,8 @@ func (p *ShadowrocketTemplateProducer) transformProxies(proxies []Proxy, opts *P
 
 		// WireGuard transformations
 		if proxyType == "wireguard" {
-			// Keepalive
-			if !IsPresent(transformed, "keepalive") && IsPresent(transformed, "persistent-keepalive") {
-				transformed["keepalive"] = GetInt(transformed, "persistent-keepalive")
-			}
-			transformed["persistent-keepalive"] = GetInt(transformed, "keepalive")
-
-			// Preshared key
-			if !IsPresent(transformed, "preshared-key") && IsPresent(transformed, "pre-shared-key") {
-				transformed["preshared-key"] = GetString(transformed, "pre-shared-key")
-			}
-			transformed["pre-shared-key"] = GetString(transformed, "preshared-key")
+			// Keepalive / preshared key:只在非零 / 非空时输出(见 normalizeWireGuardOptionalFields)
+			normalizeWireGuardOptionalFields(transformed)
 		}
 
 		// Snell transformations

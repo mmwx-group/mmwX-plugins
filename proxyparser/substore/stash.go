@@ -265,19 +265,8 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 
 		// WireGuard transformations
 		if proxyType == "wireguard" {
-			keepalive := GetInt(transformed, "keepalive")
-			if keepalive == 0 {
-				keepalive = GetInt(transformed, "persistent-keepalive")
-			}
-			transformed["keepalive"] = keepalive
-			transformed["persistent-keepalive"] = keepalive
-
-			presharedKey := GetString(transformed, "preshared-key")
-			if presharedKey == "" {
-				presharedKey = GetString(transformed, "pre-shared-key")
-			}
-			transformed["preshared-key"] = presharedKey
-			transformed["pre-shared-key"] = presharedKey
+			// 只在非零 / 非空时输出 keepalive 与 psk(见 normalizeWireGuardOptionalFields)
+			normalizeWireGuardOptionalFields(transformed)
 		}
 
 		// Snell transformations
