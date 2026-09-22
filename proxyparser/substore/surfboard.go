@@ -66,11 +66,10 @@ func (p *SurfboardProducer) Produce(proxies []Proxy, outputType string, opts *Pr
 	for _, proxy := range proxies {
 		result, err := p.produceSingle(proxy)
 		if err != nil {
-			// Skip unsupported proxies if configured
-			if opts.IncludeUnsupportedProxy {
-				continue
-			}
-			return nil, err
+			// 不支持的节点逐个跳过,与 Surge / QX 一致(上游 JS 也是逐节点 catch 后丢弃)。
+			// 以前 IncludeUnsupportedProxy=false 时直接 return err —— 主控从不设这个选项,
+			// 订阅里只要有一个 WireGuard / VLESS 之类的节点,整份 Surfboard 订阅就生成失败。
+			continue
 		}
 		results = append(results, result)
 	}

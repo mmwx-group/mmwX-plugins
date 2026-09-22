@@ -19,10 +19,11 @@ func surfboardProduce(t *testing.T, proxy Proxy) string {
 	return s
 }
 
+// surfboardProduceErr 返回单个节点被拒的原因。Produce 对不支持的节点逐个跳过、不再返回错误,
+// 所以这里直接看 produceSingle。
 func surfboardProduceErr(t *testing.T, proxy Proxy) error {
 	t.Helper()
-	p := NewSurfboardProducer()
-	_, err := p.Produce([]Proxy{proxy}, "", nil)
+	_, err := NewSurfboardProducer().produceSingle(proxy)
 	return err
 }
 

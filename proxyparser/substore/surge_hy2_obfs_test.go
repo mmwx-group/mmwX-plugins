@@ -56,13 +56,15 @@ func TestSurfboardTuicV5(t *testing.T) {
 	}
 }
 
-// 带 token 的是 TUIC v4,Surfboard 不认,要拒绝。
+// 带 token 的是 TUIC v4,Surfboard 不认,要拒绝(Produce 里逐个跳过,不让整份订阅失败)。
 func TestSurfboardTuicV4Rejected(t *testing.T) {
-	_, err := (&SurfboardProducer{}).Produce([]Proxy{{
-		"name": "tuic-v4", "type": "tuic", "server": "1.2.3.4", "port": 443, "token": "tk",
-	}}, "", &ProduceOptions{})
-	if err == nil {
+	v4 := Proxy{"name": "tuic-v4", "type": "tuic", "server": "1.2.3.4", "port": 443, "token": "tk"}
+	if _, err := NewSurfboardProducer().produceSingle(v4); err == nil {
 		t.Fatal("TUIC v4 应被拒")
+	}
+	out, err := (&SurfboardProducer{}).Produce([]Proxy{v4}, "", &ProduceOptions{})
+	if err != nil || out != "" {
+		t.Fatalf("TUIC v4 应被跳过,得到 %q / %v", out, err)
 	}
 }
 
