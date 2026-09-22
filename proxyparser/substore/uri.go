@@ -72,8 +72,19 @@ func uriEncodeComponent(s string) string {
 // (包括 proxyparser v0.2.7 及更早)会把字面 '+' 当成空格,2022 PSK / 密码
 // 导出后就导不回来(#885)。
 func uriEncodeUserInfo(s string) string {
+	return uriEscapeExcept(s, "-._~!$&'()*,;=:")
+}
+
+// uriEncodeTrojanPassword 同 uriEncodeUserInfo,但 '+' 保持字面量。trojan 的导入端都不按
+// 表单解码:≤v0.2.7 原样读,新版 / Sub-Store / mihomo 按 RFC 3986 解,编成 %2B 谁也不帮,
+// 只会让 ≤v0.2.7 读到 "%2B"(base64 风格的自定义密码最常见)。
+func uriEncodeTrojanPassword(s string) string {
+	return uriEscapeExcept(s, "-._~!$&'()*+,;=:")
+}
+
+// uriEscapeExcept 把字母数字和 safe 以外的字节都写成 %XX。
+func uriEscapeExcept(s, safe string) string {
 	const upperhex = "0123456789ABCDEF"
-	const safe = "-._~!$&'()*,;=:"
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -800,7 +811,7 @@ func (p *URIProducer) encodeTrojan(proxy Proxy) (string, error) {
 	// fragment 用 uriEncodeComponent 对齐 JS encodeURIComponent(proxy.name)。
 	// password 要编码: 导入端会解 %XX, 原样拼接时含 '%'/'#'/'?' 的密码导不回来。
 	uri := fmt.Sprintf("trojan://%s@%s:%d?%s#%s",
-		uriEncodeUserInfo(password), server, port, params.Encode(), uriEncodeComponent(name))
+		uriEncodeTrojanPassword(password), server, port, params.Encode(), uriEncodeComponent(name))
 	return uri, nil
 }
 

@@ -44,12 +44,8 @@ func parseQueryParams(query string) map[string]string {
 		kv := strings.SplitN(pair, "=", 2)
 		if len(kv) == 2 {
 			key, _ := url.QueryUnescape(kv[0])
+			// query 是表单编码('+' 是空格),obfs-password 等密码参数也不例外(#885 只动 userinfo)
 			value, _ := url.QueryUnescape(kv[1])
-			if isCredentialQueryParam(key) {
-				// 密码里的 '+' 是字面量,不是表单空格。其余参数(path 等)仍按表单解码:
-				// trojan/naive/mieru 导出用 url.Values.Encode,空格是编成 '+' 的。
-				value = unescapeKeepPlus(kv[1])
-			}
 			params[key] = value
 		} else if len(kv) == 1 {
 			key, _ := url.QueryUnescape(kv[0])
@@ -57,15 +53,6 @@ func parseQueryParams(query string) map[string]string {
 		}
 	}
 	return params
-}
-
-// isCredentialQueryParam 判断 query 参数是不是密码(tuic ?password=、hy2 obfs-password、hysteria obfsParam)。
-func isCredentialQueryParam(key string) bool {
-	switch key {
-	case "password", "obfs-password", "obfsParam":
-		return true
-	}
-	return false
 }
 
 // safeDecodeURIComponent safely decodes URI component, returns original on error
@@ -438,7 +425,9 @@ func parseShadowsocksURL(uri string) (map[string]any, error) {
 
 // parseSSPlugin parses SS plugin string
 func parseSSPlugin(pluginStr string) map[string]any {
-	decoded, _ := url.QueryUnescape(pluginStr)
+	// pluginStr 已被 parseQueryParams 按表单解过一层,这里再解一层是兼容双重编码;
+	// 这一层不能再把 '+' 当空格,否则 shadow-tls 密码 / obfs-host 里的 '+' 导不回来。
+	decoded := unescapeKeepPlus(pluginStr)
 	parts := strings.Split(decoded, ";")
 	if len(parts) == 0 {
 		return nil

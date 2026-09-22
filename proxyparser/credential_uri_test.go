@@ -236,21 +236,18 @@ func TestUserInfoExportSurvivesFormDecodingImporter(t *testing.T) {
 	}
 }
 
-// 别家工具导出的链接:userinfo 里字面 '+'、query 里的密码参数,都不能变空格;
-// trojan / anytls 的 %XX 要解出来。
+// 别家工具导出的链接:userinfo 里字面 '+' 不能变空格;trojan / anytls 的 %XX 要解出来。
 func TestCredentialKeepsPlusAllSchemes(t *testing.T) {
 	cases := []struct {
 		name, uri string
 		want      map[string]any
 	}{
-		{"hysteria2", "hysteria2://pa+ss%2F@h.example.com:443?obfs=salamander&obfs-password=o+p%3D#h",
+		{"hysteria2", "hysteria2://pa+ss%2F@h.example.com:443?obfs=salamander&obfs-password=o%2Bp%3D#h",
 			map[string]any{"password": "pa+ss/", "obfs-password": "o+p="}},
-		{"hysteria-obfsParam", "hysteria://pa+ss@h.example.com:443?obfs=xplus&obfsParam=o+p#h",
-			map[string]any{"password": "pa+ss", "obfs-password": "o+p"}},
+		{"hysteria", "hysteria://pa+ss@h.example.com:443?obfs=xplus#h",
+			map[string]any{"password": "pa+ss"}},
 		{"tuic-userinfo", "tuic://11111111-2222-3333-4444-555555555555:pa+ss%40@h.example.com:443#t",
 			map[string]any{"password": "pa+ss@"}},
-		{"tuic-query", "tuic://11111111-2222-3333-4444-555555555555@h.example.com:443?password=pa+ss%2F#t",
-			map[string]any{"password": "pa+ss/"}},
 		{"socks5-plain", "socks5://us+er:pa+ss%3A@h.example.com:1080#s",
 			map[string]any{"username": "us+er", "password": "pa+ss:"}},
 		{"http", "http://us+er:pa+ss%25@h.example.com:8080#h",
@@ -274,9 +271,40 @@ func TestCredentialKeepsPlusAllSchemes(t *testing.T) {
 	}
 }
 
-// 只有密码类 query 参数不按表单解码;path 等照旧('+' 是空格),
-// 因为 trojan/naive/mieru 导出用 url.Values.Encode,空格被编成 '+'。
-func TestNonCredentialQueryStillFormDecoded(t *testing.T) {
+// query 与 userinfo 不同,是表单编码:3x-ui(url.Values / URLSearchParams)、hysteria2 官方、
+// PHP 面板都把空格写成 '+'、'+' 写成 %2B。密码类参数(obfs-password / tuic ?password= /
+// obfsParam)和 path 一样按表单解,否则带空格的密码导进来是 '+',握手失败。
+func TestQueryParamsFormDecoded(t *testing.T) {
+	const obfsPW, tuicPW = "my obfs+1/=", "p w+x"
+	q := url.Values{}
+	q.Set("obfs", "salamander")
+	q.Set("obfs-password", obfsPW)
+	hy2 := "hysteria2://auth@1.2.3.4:443?" + q.Encode() + "#x"
+	if !strings.Contains(hy2, "my+obfs%2B1") {
+		t.Fatalf("测试前提:url.Values 应把空格编成 '+'、'+' 编成 %%2B: %s", hy2)
+	}
+	tq := url.Values{}
+	tq.Set("password", tuicPW)
+	tuic := "tuic://11111111-2222-3333-4444-555555555555@h.example.com:443?" + tq.Encode() + "#t"
+
+	cases := []struct {
+		name, uri string
+		want      map[string]any
+	}{
+		{"hy2-url.Values", hy2, map[string]any{"obfs-password": obfsPW}},
+		{"tuic-url.Values", tuic, map[string]any{"password": tuicPW}},
+		{"hysteria-obfsParam", "hysteria://pw@h.example.com:443?obfs=xplus&obfsParam=o+p%2B#h",
+			map[string]any{"obfs-password": "o p+"}},
+	}
+	for _, c := range cases {
+		node, err := Parse(c.uri)
+		if err != nil {
+			t.Errorf("[%s] 解析失败: %v", c.name, err)
+			continue
+		}
+		subset(t, c.name, node, c.want)
+	}
+
 	node, err := Parse("trojan://pw@h.example.com:443?type=ws&path=%2Fa+b#t")
 	if err != nil {
 		t.Fatal(err)
@@ -284,5 +312,68 @@ func TestNonCredentialQueryStillFormDecoded(t *testing.T) {
 	ws, _ := node["ws-opts"].(map[string]any)
 	if ws == nil || ws["path"] != "/a b" {
 		t.Fatalf("ws path = %v,期望 %q", ws, "/a b")
+	}
+}
+
+// trojan 的导入端都不按表单解码,'+' 导出时保持字面量:≤v0.2.7(原样读密码)导入
+// base64 风格的密码也不会读到 "%2B"。'%' '/' '@' 等照样转义。
+func TestTrojanExportKeepsPlusLiteral(t *testing.T) {
+	producer := substore.NewURIProducer()
+	cases := []struct{ password, userinfo string }{
+		{"p+ss", "p+ss"},
+		{"Ab+cDef+==", "Ab+cDef+=="},
+		{"Ab+cD/e==", "Ab+cD%2Fe=="},
+		{"p%41@x", "p%2541%40x"},
+	}
+	for _, c := range cases {
+		uri, err := producer.ProduceOne(substore.Proxy{"type": "trojan", "name": "t",
+			"server": "h.example.com", "port": 443, "password": c.password})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rest := strings.TrimPrefix(uri, "trojan://")
+		if got := rest[:strings.LastIndex(rest, "@")]; got != c.userinfo {
+			t.Errorf("[%s] 导出 userinfo = %q,期望 %q (uri=%s)", c.password, got, c.userinfo, uri)
+		}
+		node, err := Parse(uri)
+		if err != nil || node["password"] != c.password {
+			t.Errorf("[%s] 导回来是 %v (err=%v, uri=%s)", c.password, node["password"], err, uri)
+		}
+	}
+}
+
+// ss 插件参数整串是 plugin=<encodeURIComponent(...)>,parseQueryParams 已解过一层;
+// parseSSPlugin 再解一层时不能把 '+' 当空格,shadow-tls 密码 / obfs-host 才导得回来。
+func TestSSPluginOptsKeepPlus(t *testing.T) {
+	producer := substore.NewURIProducer()
+	cases := []struct {
+		name  string
+		proxy substore.Proxy
+		want  map[string]any
+	}{
+		{"shadow-tls", substore.Proxy{"type": "ss", "name": "s", "server": "h.example.com", "port": 8388,
+			"cipher": "aes-128-gcm", "password": "pw", "plugin": "shadow-tls",
+			"plugin-opts": map[string]any{"host": "ex.com", "password": "Ab+cD/e==", "version": 3}},
+			map[string]any{"host": "ex.com", "password": "Ab+cD/e==", "version": 3}},
+		{"obfs", substore.Proxy{"type": "ss", "name": "s", "server": "h.example.com", "port": 8388,
+			"cipher": "aes-128-gcm", "password": "pw", "plugin": "obfs",
+			"plugin-opts": map[string]any{"mode": "http", "host": "a+b.example.com"}},
+			map[string]any{"mode": "http", "host": "a+b.example.com"}},
+	}
+	for _, c := range cases {
+		uri, err := producer.ProduceOne(c.proxy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		node, err := Parse(uri)
+		if err != nil {
+			t.Fatalf("[%s] 导入失败 %s: %v", c.name, uri, err)
+		}
+		opts, _ := node["plugin-opts"].(map[string]any)
+		for k, v := range c.want {
+			if opts[k] != v {
+				t.Errorf("[%s] plugin-opts.%s = %#v,期望 %#v (uri=%s)", c.name, k, opts[k], v, uri)
+			}
+		}
 	}
 }
