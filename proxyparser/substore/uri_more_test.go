@@ -360,7 +360,7 @@ func TestURIUserInfoKeepsSafeSymbolsAndEscapesDelimiters(t *testing.T) {
 		"type": "hysteria2", "name": "hy2", "server": "hy.example.com", "port": 443,
 		"password": `price$+value=@/?#%`,
 	})
-	if !strings.HasPrefix(hy2, `hysteria2://price$+value=%40%2F%3F%23%25@hy.example.com:443?`) {
+	if !strings.HasPrefix(hy2, `hysteria2://price$%2Bvalue=%40%2F%3F%23%25@hy.example.com:443?`) {
 		t.Fatalf("unexpected hysteria2 userinfo: %s", hy2)
 	}
 
@@ -368,7 +368,7 @@ func TestURIUserInfoKeepsSafeSymbolsAndEscapesDelimiters(t *testing.T) {
 		"type": "ss", "name": "ss", "server": "ss.example.com", "port": 8388,
 		"cipher": "2022-blake3-aes-128-gcm", "password": `ab+$=/@?#%`,
 	})
-	if !strings.HasPrefix(ss2022, `ss://2022-blake3-aes-128-gcm:ab+$=%2F%40%3F%23%25@ss.example.com:8388`) {
+	if !strings.HasPrefix(ss2022, `ss://2022-blake3-aes-128-gcm:ab%2B$=%2F%40%3F%23%25@ss.example.com:8388`) {
 		t.Fatalf("unexpected shadowsocks 2022 userinfo: %s", ss2022)
 	}
 }

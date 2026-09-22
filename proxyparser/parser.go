@@ -45,6 +45,11 @@ func parseQueryParams(query string) map[string]string {
 		if len(kv) == 2 {
 			key, _ := url.QueryUnescape(kv[0])
 			value, _ := url.QueryUnescape(kv[1])
+			if isCredentialQueryParam(key) {
+				// 密码里的 '+' 是字面量,不是表单空格。其余参数(path 等)仍按表单解码:
+				// trojan/naive/mieru 导出用 url.Values.Encode,空格是编成 '+' 的。
+				value = unescapeKeepPlus(kv[1])
+			}
 			params[key] = value
 		} else if len(kv) == 1 {
 			key, _ := url.QueryUnescape(kv[0])
@@ -52,6 +57,15 @@ func parseQueryParams(query string) map[string]string {
 		}
 	}
 	return params
+}
+
+// isCredentialQueryParam 判断 query 参数是不是密码(tuic ?password=、hy2 obfs-password、hysteria obfsParam)。
+func isCredentialQueryParam(key string) bool {
+	switch key {
+	case "password", "obfs-password", "obfsParam":
+		return true
+	}
+	return false
 }
 
 // safeDecodeURIComponent safely decodes URI component, returns original on error
@@ -316,12 +330,9 @@ func parseShadowsocksURL(uri string) (map[string]any, error) {
 
 	if strings.Contains(mainPart, "@") {
 		atIdx := strings.LastIndex(mainPart, "@")
-		authPart := mainPart[:atIdx]
-		if strings.Contains(authPart, "%") {
-			if decoded, err := url.QueryUnescape(authPart); err == nil {
-				authPart = decoded
-			}
-		}
+		// userinfo 不是表单编码,'+' 是字面量。2022 的 PSK 和标准 base64 userinfo 都含 '+',
+		// 只要同时出现 %3D / %2F / %3A,QueryUnescape 就把 '+' 变成空格(#885)。
+		authPart := unescapeKeepPlus(mainPart[:atIdx])
 		serverPart := mainPart[atIdx+1:]
 
 		// Parse server:port
@@ -636,13 +647,14 @@ func parseSocksURL(uri string) (map[string]any, error) {
 		if isPlainAuth {
 			colonIdx := strings.Index(authPart, ":")
 			if colonIdx != -1 {
-				username, _ = url.QueryUnescape(authPart[:colonIdx])
-				password, _ = url.QueryUnescape(authPart[colonIdx+1:])
+				username = unescapeKeepPlus(authPart[:colonIdx])
+				password = unescapeKeepPlus(authPart[colonIdx+1:])
 			} else {
-				username, _ = url.QueryUnescape(authPart)
+				username = unescapeKeepPlus(authPart)
 			}
 		} else {
-			decoded, err := base64DecodeURLSafe(authPart)
+			// 导出端(uri.go)对 base64 做了 PathEscape,'/' 会写成 %2F,先解 %XX 再解 base64
+			decoded, err := base64DecodeURLSafe(unescapeKeepPlus(authPart))
 			if err == nil {
 				colonIdx := strings.Index(decoded, ":")
 				if colonIdx != -1 {
@@ -720,7 +732,7 @@ func parseTrojanURL(uri string) (map[string]any, error) {
 		return nil, fmt.Errorf("invalid trojan url: missing @")
 	}
 
-	password := mainPart[:atIdx]
+	password := unescapeKeepPlus(mainPart[:atIdx])
 	serverPart := mainPart[atIdx+1:]
 
 	server, port := parseServerPortWithDefault(serverPart, 443)
@@ -1012,7 +1024,7 @@ func parseHysteriaGeneric(uri string, protocol string) (map[string]any, error) {
 		return nil, fmt.Errorf("invalid %s url: missing @", protocol)
 	}
 
-	password := safeDecodeURIComponent(mainPart[:atIdx])
+	password := unescapeKeepPlus(mainPart[:atIdx])
 	serverPart := mainPart[atIdx+1:]
 
 	server, port := parseServerPortWithDefault(serverPart, 0)
@@ -1116,7 +1128,7 @@ func parseTuicURL(uri string) (map[string]any, error) {
 		return nil, fmt.Errorf("invalid tuic url: missing @")
 	}
 
-	authPart := safeDecodeURIComponent(mainPart[:atIdx])
+	authPart := unescapeKeepPlus(mainPart[:atIdx])
 	serverPart := mainPart[atIdx+1:]
 
 	var uuid, password string
@@ -1215,7 +1227,8 @@ func parseAnytlsURL(uri string) (map[string]any, error) {
 		return nil, fmt.Errorf("invalid anytls url: missing @")
 	}
 
-	password := mainPart[:atIdx]
+	// 导出端用 url.PathEscape,这里对应解 %XX('+' 保持字面量)
+	password := unescapeKeepPlus(mainPart[:atIdx])
 	serverPart := mainPart[atIdx+1:]
 
 	server, port := parseServerPortWithDefault(serverPart, 443)
@@ -1484,10 +1497,10 @@ func parseHTTPURL(uri string) (map[string]any, error) {
 		authPart := mainPart[:atIdx]
 		serverPart = mainPart[atIdx+1:]
 		if colonIdx := strings.Index(authPart, ":"); colonIdx != -1 {
-			username, _ = url.QueryUnescape(authPart[:colonIdx])
-			password, _ = url.QueryUnescape(authPart[colonIdx+1:])
+			username = unescapeKeepPlus(authPart[:colonIdx])
+			password = unescapeKeepPlus(authPart[colonIdx+1:])
 		} else {
-			username, _ = url.QueryUnescape(authPart)
+			username = unescapeKeepPlus(authPart)
 		}
 	} else {
 		serverPart = mainPart
@@ -1546,10 +1559,10 @@ func parseNaiveURL(uri string) (map[string]any, error) {
 
 	var username, password string
 	if colonIdx := strings.Index(authPart, ":"); colonIdx != -1 {
-		username, _ = url.QueryUnescape(authPart[:colonIdx])
-		password, _ = url.QueryUnescape(authPart[colonIdx+1:])
+		username = unescapeKeepPlus(authPart[:colonIdx])
+		password = unescapeKeepPlus(authPart[colonIdx+1:])
 	} else {
-		username, _ = url.QueryUnescape(authPart)
+		username = unescapeKeepPlus(authPart)
 	}
 
 	node := map[string]any{
@@ -1611,7 +1624,7 @@ func parseMieruURL(uri string) (map[string]any, error) {
 		return nil, fmt.Errorf("invalid mieru url: missing @")
 	}
 
-	authPart, _ := url.QueryUnescape(mainPart[:atIdx])
+	authPart := unescapeKeepPlus(mainPart[:atIdx])
 	serverPart := mainPart[atIdx+1:]
 	server, port := parseServerPortWithDefault(serverPart, 0)
 	// host 段没带端口时从 query 取 —— 官方导出的链接就是这么写的。

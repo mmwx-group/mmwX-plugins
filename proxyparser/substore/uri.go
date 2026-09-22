@@ -64,12 +64,16 @@ func uriEncodeComponent(s string) string {
 // uriEncodeUserInfo 编码 URI authority 中的用户名/密码。
 //
 // encodeURIComponent 会把 RFC 3986 明确允许出现在 userinfo 中的 sub-delims
-// （如 $、+、=）也编码成 %XX。虽然标准客户端应当解码，但部分代理客户端会把
+// （如 $、=）也编码成 %XX。虽然标准客户端应当解码，但部分代理客户端会把
 // 百分号编码后的文本直接当作密码，导致认证失败。这里保留合法 userinfo 字符，
 // 同时继续编码 @、/、?、#、% 等会改变 URI 结构或产生歧义的字符。
+//
+// '+' 例外,照样编成 %2B(与 encodeURIComponent 一致):按表单解码的导入端
+// (包括 proxyparser v0.2.7 及更早)会把字面 '+' 当成空格,2022 PSK / 密码
+// 导出后就导不回来(#885)。
 func uriEncodeUserInfo(s string) string {
 	const upperhex = "0123456789ABCDEF"
-	const safe = "-._~!$&'()*+,;=:"
+	const safe = "-._~!$&'()*,;=:"
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -794,8 +798,9 @@ func (p *URIProducer) encodeTrojan(proxy Proxy) (string, error) {
 	// 注: JS trojan 不输出 udp 参数, 故此处不再追加 (此前 Go 多输出 udp, 已纠正)。
 
 	// fragment 用 uriEncodeComponent 对齐 JS encodeURIComponent(proxy.name)。
+	// password 要编码: 导入端会解 %XX, 原样拼接时含 '%'/'#'/'?' 的密码导不回来。
 	uri := fmt.Sprintf("trojan://%s@%s:%d?%s#%s",
-		password, server, port, params.Encode(), uriEncodeComponent(name))
+		uriEncodeUserInfo(password), server, port, params.Encode(), uriEncodeComponent(name))
 	return uri, nil
 }
 
