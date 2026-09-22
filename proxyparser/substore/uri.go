@@ -1280,6 +1280,29 @@ func (p *URIProducer) encodeHTTP(proxy Proxy) (string, error) {
 	return uri, nil
 }
 
+// wireGuardURIParamValue 把 WG 参数值转成 URI 里的字符串。列表(allowed-ips / reserved / dns)
+// 用逗号连接,与前端 encodeURIComponent(数组) 一致;以前用 %v 写成 "[0.0.0.0/0 ::/0]",
+// 导回来是一个坏网段,reserved 也凑不齐 3 段被丢掉。
+func wireGuardURIParamValue(val interface{}) string {
+	switch list := val.(type) {
+	case []interface{}:
+		parts := make([]string, 0, len(list))
+		for _, item := range list {
+			parts = append(parts, fmt.Sprintf("%v", item))
+		}
+		return strings.Join(parts, ",")
+	case []string:
+		return strings.Join(list, ",")
+	case []int:
+		parts := make([]string, 0, len(list))
+		for _, item := range list {
+			parts = append(parts, fmt.Sprintf("%d", item))
+		}
+		return strings.Join(parts, ",")
+	}
+	return fmt.Sprintf("%v", val)
+}
+
 // encodeWireGuard encodes WireGuard proxy to wireguard:// URI (matches frontend)
 func (p *URIProducer) encodeWireGuard(proxy Proxy) (string, error) {
 	server := GetString(proxy, "server")
@@ -1323,7 +1346,7 @@ func (p *URIProducer) encodeWireGuard(proxy Proxy) (string, error) {
 				}
 			}
 		} else if val != nil && val != "" {
-			params.Set(key, fmt.Sprintf("%v", val))
+			params.Set(key, wireGuardURIParamValue(val))
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -1305,12 +1306,15 @@ func parseWireGuardURL(uri string) (map[string]any, error) {
 		return nil, fmt.Errorf("invalid wireguard url")
 	}
 
-	privateKey, _ := url.QueryUnescape(match[2])
+	// 私钥是标准 base64,约一半含 '+'。QueryUnescape 会把 '+' 变成空格,密钥当场作废;
+	// 我们自己导出的 URI(uri.go 用 PathEscape)也就导不回来。这里按 RFC 3986 只解 %XX。
+	privateKey := unescapeKeepPlus(match[2])
 	server := match[3]
 	port := 51820
 	if match[5] != "" {
 		port, _ = strconv.Atoi(match[5])
 	}
+	server, port = normalizeWireGuardHost(server, match[5], port)
 	addons := match[7]
 	name := match[8]
 	if name != "" {
@@ -1339,6 +1343,10 @@ func parseWireGuardURL(uri string) (map[string]any, error) {
 		}
 		key := strings.ToLower(strings.ReplaceAll(kv[0], "_", "-"))
 		value, _ := url.QueryUnescape(kv[1])
+		if isWireGuardKeyParam(key) {
+			// 密钥类参数里的 '+' 是 base64 字符,不是空格(未转义的 publickey=Zz+y= 很常见)
+			value = unescapeKeepPlus(kv[1])
+		}
 
 		switch key {
 		case "reserved":
@@ -1374,19 +1382,21 @@ func parseWireGuardURL(uri string) (map[string]any, error) {
 		case "udp":
 			node["udp"] = value == "true" || value == "1"
 		case "allowed-ips":
+			// `[a,b]` 与 `a,b`(uri.go 导出的写法,与前端 encodeURIComponent(数组) 一致)都解析成列表
+			innerValue := value
 			if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
-				innerValue := value[1 : len(value)-1]
-				parts := strings.Split(innerValue, ",")
-				var ips []string
-				for _, p := range parts {
-					p = strings.TrimSpace(p)
-					if p != "" {
-						ips = append(ips, p)
-					}
+				innerValue = value[1 : len(value)-1]
+			}
+			parts := strings.Split(innerValue, ",")
+			var ips []string
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					ips = append(ips, p)
 				}
+			}
+			if len(ips) > 0 {
 				node["allowed-ips"] = ips
-			} else {
-				node["allowed-ips"] = value
 			}
 		default:
 			if key != "name" && key != "type" && key != "server" && key != "port" && key != "private-key" && key != "flag" {
@@ -1396,6 +1406,41 @@ func parseWireGuardURL(uri string) (map[string]any, error) {
 	}
 
 	return node, nil
+}
+
+// unescapeKeepPlus 按 RFC 3986 解 %XX,'+' 保持字面量(对应 JS 的 decodeURIComponent)。
+// 解码失败时原样返回,不把整个值丢成空串。
+func unescapeKeepPlus(s string) string {
+	if v, err := url.PathUnescape(s); err == nil {
+		return v
+	}
+	return s
+}
+
+// isWireGuardKeyParam 判断 wireguard:// 的参数是不是密钥(base64,可能含 '+' '/' '=')。
+func isWireGuardKeyParam(key string) bool {
+	switch key {
+	case "publickey", "public-key", "privatekey", "private-key",
+		"presharedkey", "preshared-key", "pre-shared-key":
+		return true
+	}
+	return false
+}
+
+// normalizeWireGuardHost 处理 IPv6 主机:`[v6]:port` 去掉方括号;没加方括号也没写端口的
+// v6(`@2001:db8::1/?`)会被正则把最后一段当成端口,认出来后还原成主机、端口回落默认值。
+func normalizeWireGuardHost(server, rawPort string, port int) (string, int) {
+	if strings.HasPrefix(server, "[") && strings.HasSuffix(server, "]") {
+		return server[1 : len(server)-1], port
+	}
+	if rawPort != "" && strings.Contains(server, ":") {
+		if _, err := netip.ParseAddr(server); err != nil {
+			if addr, err := netip.ParseAddr(server + ":" + rawPort); err == nil && addr.Is6() {
+				return server + ":" + rawPort, 51820
+			}
+		}
+	}
+	return server, port
 }
 
 // parseHTTPURL parses http:// or https:// proxy URL
