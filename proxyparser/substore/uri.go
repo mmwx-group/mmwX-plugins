@@ -1337,6 +1337,18 @@ func (p *URIProducer) encodeWireGuard(proxy Proxy) (string, error) {
 		if strings.HasPrefix(key, "_") {
 			continue
 		}
+		// 可选字段只在非零时输出(与 clash 系 producer 口径一致):mtu / 保活为 0 没有意义,
+		// 全 0 的 reserved 等于没配。
+		switch key {
+		case "mtu", "keepalive", "persistent-keepalive":
+			if GetInt(proxy, key) <= 0 {
+				continue
+			}
+		case "reserved":
+			if wireGuardReservedIsZero(val) {
+				continue
+			}
+		}
 		if key == "udp" {
 			if udpBool, ok := val.(bool); ok {
 				if udpBool {
@@ -1350,9 +1362,22 @@ func (p *URIProducer) encodeWireGuard(proxy Proxy) (string, error) {
 		}
 	}
 
+	// 名字里的 '+' 也转义:PathEscape 不转义它,按表单解码的导入端会把它当空格
+	// (与前端 encodeURIComponent 的输出一致)。
+	fragment := strings.ReplaceAll(url.PathEscape(name), "+", "%2B")
 	uri := fmt.Sprintf("wireguard://%s@%s:%d/?%s#%s",
-		url.PathEscape(privateKey), server, port, params.Encode(), url.PathEscape(name))
+		url.PathEscape(privateKey), server, port, params.Encode(), fragment)
 	return uri, nil
+}
+
+// wireGuardReservedIsZero 判断 reserved 是否全 0([0,0,0] / "0,0,0" 与不配等价)。
+func wireGuardReservedIsZero(val interface{}) bool {
+	for _, part := range strings.Split(wireGuardURIParamValue(val), ",") {
+		if strings.TrimSpace(part) != "0" {
+			return false
+		}
+	}
+	return true
 }
 
 // encodeAnyTLS encodes AnyTLS proxy to anytls:// URI (matches frontend)

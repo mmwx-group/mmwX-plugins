@@ -1,6 +1,7 @@
 package substore
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -246,6 +247,47 @@ func TestClashFamilyWireGuardOptionalFieldsOnlyWhenSet(t *testing.T) {
 		got = pr.run(stashStyle)
 		if GetInt(got, "persistent-keepalive") != 30 || GetString(got, "pre-shared-key") != "S" {
 			t.Errorf("%s: keepalive/preshared-key 写法应同步到另一个别名,得到 %#v", pr.name, got)
+		}
+	}
+}
+
+// B2 也覆盖 URI producer:零值 mtu / keepalive 与全 0 的 reserved 不写进 wireguard://。
+func TestURIWireGuardOmitsZeroOptionalFields(t *testing.T) {
+	p := masterWireGuardProxy()
+	p["mtu"] = 0
+	p["persistent-keepalive"] = 0
+	p["keepalive"] = "0"
+	p["reserved"] = []interface{}{0, 0, 0}
+	for _, producer := range []Producer{NewURIProducer(), NewV2RayProducer()} {
+		out, err := producer.Produce([]Proxy{p}, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uri := out.(string)
+		if producer.GetType() == "v2ray" {
+			raw, err := base64.StdEncoding.DecodeString(uri)
+			if err != nil {
+				t.Fatal(err)
+			}
+			uri = string(raw)
+		}
+		for _, bad := range []string{"mtu=", "keepalive=", "reserved="} {
+			if strings.Contains(uri, bad) {
+				t.Errorf("%s: 零值不应输出 %q:\n%s", producer.GetType(), bad, uri)
+			}
+		}
+	}
+
+	p = masterWireGuardProxy()
+	p["persistent-keepalive"] = 25
+	p["reserved"] = []int{1, 2, 3}
+	uri, err := NewURIProducer().ProduceOne(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"mtu=1420", "persistent-keepalive=25", "reserved=1%2C2%2C3"} {
+		if !strings.Contains(uri, want) {
+			t.Errorf("非零值应照常输出 %q:\n%s", want, uri)
 		}
 	}
 }

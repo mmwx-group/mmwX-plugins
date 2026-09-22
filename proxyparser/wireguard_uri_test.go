@@ -156,3 +156,74 @@ func TestWireGuardImportedURIToSingboxHasNoUnknownFields(t *testing.T) {
 		t.Errorf("peer = %#v", peer)
 	}
 }
+
+// 名字与 dns 也要能原样导回:名字片段以前按 QueryUnescape 解码('+' 变空格),
+// dns 列表导回来是一个逗号串(mihomo 的 dns 是 []string,标量会被拒)。
+func TestWireGuardURIRoundTripNameAndDNS(t *testing.T) {
+	priv, pub := wgKey(t, 1), wgKey(t, 60)
+	for _, dns := range []interface{}{
+		[]interface{}{"1.1.1.1", "8.8.8.8"}, // YAML 读回来的形态
+		[]string{"1.1.1.1", "8.8.8.8"},      // Go 里直接构造的形态
+	} {
+		proxy := substore.Proxy{
+			"name": "WG+HK 01", "type": "wireguard", "server": "1.2.3.4", "port": 51820,
+			"udp": true, "private-key": priv, "public-key": pub, "ip": "10.66.0.5", "dns": dns,
+		}
+		uri := exportWireGuardURI(t, proxy)
+		// '+' 也要转义:按表单解码的导入端(旧版本的本解析器等)否则会把它当空格
+		if !strings.HasSuffix(uri, "#WG%2BHK%2001") {
+			t.Errorf("名字片段应为 WG%%2BHK%%2001,得到 %s", uri)
+		}
+		got, err := Parse(uri)
+		if err != nil {
+			t.Fatalf("导回失败: %v\n%s", err, uri)
+		}
+		if got["name"] != "WG+HK 01" {
+			t.Errorf("name = %#v, want %q\nURI: %s", got["name"], "WG+HK 01", uri)
+		}
+		if want := []interface{}{"1.1.1.1", "8.8.8.8"}; !reflect.DeepEqual(got["dns"], want) {
+			t.Errorf("dns(%T) = %#v, want %#v\nURI: %s", dns, got["dns"], want, uri)
+		}
+	}
+}
+
+// 第三方 URI:名字片段按 decodeURIComponent 语义('+' 是字面量,与上游 Sub-Store 一致);
+// v0.2.7 导出的列表是 "[a b]"(%v 格式),也要能拆回列表。
+func TestWireGuardURIThirdPartyNameAndLegacyLists(t *testing.T) {
+	got, err := Parse("wireguard://k@1.2.3.4:51820?publickey=P&address=10.0.0.2/32" +
+		"&dns=%5B1.1.1.1+8.8.8.8%5D&allowed-ips=%5B0.0.0.0%2F0+%3A%3A%2F0%5D#WG+HK%2001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["name"] != "WG+HK 01" {
+		t.Errorf("name = %#v, want %q", got["name"], "WG+HK 01")
+	}
+	if want := []interface{}{"1.1.1.1", "8.8.8.8"}; !reflect.DeepEqual(got["dns"], want) {
+		t.Errorf("dns = %#v, want %#v", got["dns"], want)
+	}
+	if want := []string{"0.0.0.0/0", "::/0"}; !reflect.DeepEqual(got["allowed-ips"], want) {
+		t.Errorf("allowed-ips = %#v, want %#v", got["allowed-ips"], want)
+	}
+}
+
+// 导入的 dns 直接(不经 YAML)进各 producer:clash 系输出列表,Loon 只取一个 v4 / 一个 v6。
+func TestWireGuardImportedDNSDownstream(t *testing.T) {
+	node, err := Parse("wireguard://k@1.2.3.4:51820?publickey=P&address=10.0.0.2/32&dns=1.1.1.1,2606:4700::1111,8.8.8.8#n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := substore.NewClashMetaProducer().Produce([]substore.Proxy{node}, "internal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list := out.([]substore.Proxy); len(list) != 1 || substore.GetStringSlice(list[0], "dns") == nil {
+		t.Errorf("clashmeta 的 dns 应是列表,得到 %#v", list)
+	}
+	line, err := substore.NewLoonProducer().ProduceOne(node, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(line, ",dns=1.1.1.1,") || !strings.Contains(line, ",dnsv6=2606:4700::1111") || strings.Contains(line, "8.8.8.8") {
+		t.Errorf("Loon 的 dns 应只有一个 v4 + 一个 v6:\n%s", line)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // base64DecodeURLSafe decodes URL-safe base64 string
@@ -1318,7 +1319,9 @@ func parseWireGuardURL(uri string) (map[string]any, error) {
 	addons := match[7]
 	name := match[8]
 	if name != "" {
-		name, _ = url.QueryUnescape(name)
+		// 片段不是表单编码,'+' 是字面量(与上游 Sub-Store 的 decodeURIComponent 一致)。
+		// QueryUnescape 会把 'WG+HK' 解成 'WG HK',自己导出的 URI 也就导不回来。
+		name = unescapeKeepPlus(name)
 	} else {
 		name = fmt.Sprintf("WireGuard %s:%d", server, port)
 	}
@@ -1382,21 +1385,18 @@ func parseWireGuardURL(uri string) (map[string]any, error) {
 		case "udp":
 			node["udp"] = value == "true" || value == "1"
 		case "allowed-ips":
-			// `[a,b]` 与 `a,b`(uri.go 导出的写法,与前端 encodeURIComponent(数组) 一致)都解析成列表
-			innerValue := value
-			if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
-				innerValue = value[1 : len(value)-1]
-			}
-			parts := strings.Split(innerValue, ",")
-			var ips []string
-			for _, p := range parts {
-				p = strings.TrimSpace(p)
-				if p != "" {
-					ips = append(ips, p)
-				}
-			}
-			if len(ips) > 0 {
+			if ips := splitWireGuardURIList(value); len(ips) > 0 {
 				node["allowed-ips"] = ips
+			}
+		case "dns":
+			// mihomo 的 dns 是列表,原样存成逗号串会输出成标量。用 []interface{}(YAML 读回来的
+			// 形态):Loon / Egern / Surge 的 WG dns 处理只认这个类型和字符串,不认 []string。
+			if servers := splitWireGuardURIList(value); len(servers) > 0 {
+				list := make([]interface{}, len(servers))
+				for i, s := range servers {
+					list[i] = s
+				}
+				node["dns"] = list
 			}
 		default:
 			if key != "name" && key != "type" && key != "server" && key != "port" && key != "private-key" && key != "flag" {
@@ -1415,6 +1415,18 @@ func unescapeKeepPlus(s string) string {
 		return v
 	}
 	return s
+}
+
+// splitWireGuardURIList 把 wireguard:// 里的列表参数拆开。认 `a,b`(uri.go 导出的写法,与前端
+// encodeURIComponent(数组) 一致)、`[a,b]`,以及 v0.2.7 按 %v 导出的 `[a b]`。
+func splitWireGuardURIList(value string) []string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+		value = value[1 : len(value)-1]
+	}
+	return strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
 }
 
 // isWireGuardKeyParam 判断 wireguard:// 的参数是不是密钥(base64,可能含 '+' '/' '=')。
