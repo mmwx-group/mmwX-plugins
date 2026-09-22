@@ -98,3 +98,18 @@ func TestEgernWireGuardZeroOptionalFieldsOmitted(t *testing.T) {
 		t.Errorf("keepalive / mtu 应输出,得到 %#v", fields)
 	}
 }
+
+// Loon 与 sing-box 共用 allowed-ips 的规整:坏网段丢掉,全坏时回落默认值。
+func TestLoonWireGuardMalformedAllowedIPs(t *testing.T) {
+	for in, want := range map[string]string{
+		"[0.0.0.0/0, ::/0]": `allowed-ips="0.0.0.0/0,::/0",`,
+		"['10.0.0.0/8']":    `allowed-ips="10.0.0.0/8",`,
+		"garbage":           `allowed-ips="0.0.0.0/0,::/0",`,
+	} {
+		p := masterWireGuardProxy()
+		p["allowed-ips"] = in
+		if line := loonWireGuardLine(t, p); !strings.Contains(line, want) {
+			t.Errorf("allowed-ips=%q 应输出 %s:\n%s", in, want, line)
+		}
+	}
+}

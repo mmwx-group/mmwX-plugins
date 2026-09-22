@@ -3,6 +3,8 @@ package substore
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -247,6 +249,35 @@ func TestClashFamilyWireGuardOptionalFieldsOnlyWhenSet(t *testing.T) {
 		got = pr.run(stashStyle)
 		if GetInt(got, "persistent-keepalive") != 30 || GetString(got, "pre-shared-key") != "S" {
 			t.Errorf("%s: keepalive/preshared-key 写法应同步到另一个别名,得到 %#v", pr.name, got)
+		}
+	}
+}
+
+// 顶层 allowed-ips 是「看着像数组的标量」时(主控 fixWireGuardAllowedIPs 处理的就是这类),
+// 以前被切成 "[0.0.0.0/0" 这种坏网段原样写进 peers[].allowed_ips,sing-box 整份拒载。
+// 每一项都要是合法网段;一个合法的都没有时回落默认值。
+func TestSingboxWireGuardMalformedAllowedIPs(t *testing.T) {
+	cases := []struct {
+		in   interface{}
+		want []interface{}
+	}{
+		{"[0.0.0.0/0, ::/0]", []interface{}{"0.0.0.0/0", "::/0"}},
+		{"['0.0.0.0/0']", []interface{}{"0.0.0.0/0"}},
+		{`["10.0.0.0/8"]`, []interface{}{"10.0.0.0/8"}},
+		{[]interface{}{"10.0.0.0/8", "not-a-cidr", "[::/0]"}, []interface{}{"10.0.0.0/8", "::/0"}},
+		{"10.1.2.3", []interface{}{"10.1.2.3/32"}},
+		{"garbage", []interface{}{"0.0.0.0/0", "::/0"}}, // 全不合法 → 默认值(有 ipv6 时带 ::/0)
+	}
+	for _, tc := range cases {
+		proxy := masterWireGuardProxy()
+		proxy["allowed-ips"] = tc.in
+		_, peer := singboxWGEndpoint(t, proxy)
+		wantField(t, fmt.Sprintf("peer(%#v)", tc.in), peer, "allowed_ips", tc.want)
+		ips, _ := peer["allowed_ips"].([]interface{})
+		for _, ip := range ips {
+			if _, err := netip.ParsePrefix(fmt.Sprint(ip)); err != nil {
+				t.Errorf("allowed_ips 出现非法网段 %q(sing-box 会整份拒载)", ip)
+			}
 		}
 	}
 }

@@ -1867,7 +1867,7 @@ func (p *SingboxProducer) wireguardParser(proxy Proxy) (map[string]interface{}, 
 		}
 		if allowedIPs == nil && singlePeer {
 			// 单 peer 写法(mihomo 顶层字段)的 allowed-ips 也在顶层,以前被忽略、一律回落默认值
-			allowedIPs = wireGuardStringList(proxy["allowed-ips"])
+			allowedIPs = wireGuardAllowedIPs(proxy["allowed-ips"])
 		}
 		if allowedIPs == nil {
 			allowedIPs = []string{"0.0.0.0/0"}

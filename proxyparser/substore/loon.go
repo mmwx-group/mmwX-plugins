@@ -667,7 +667,7 @@ func (p *LoonProducer) wireguard(proxy Proxy) (string, error) {
 	if GetString(proxy, "ipv6") != "" {
 		allowedIps = "0.0.0.0/0,::/0"
 	}
-	if ips := wireGuardStringList(proxy["allowed-ips"]); len(ips) > 0 {
+	if ips := wireGuardAllowedIPs(proxy["allowed-ips"]); len(ips) > 0 {
 		allowedIps = strings.Join(ips, ",")
 	}
 

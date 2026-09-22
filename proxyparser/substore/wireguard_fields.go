@@ -2,6 +2,7 @@ package substore
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
@@ -80,6 +81,25 @@ func wireGuardStringList(v interface{}) []string {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// wireGuardAllowedIPs 把 allowed-ips 规整成合法网段列表,没有一个合法项时返回 nil
+// (调用方回落默认值)。
+//
+// 「看着像数组的标量」(`"[0.0.0.0/0, ::/0]"`、`"['0.0.0.0/0']"`)按逗号切开后会带着括号 /
+// 引号,原样写进 sing-box 的 peers[].allowed_ips 就是非法网段,整份配置被拒载。这里去掉
+// 外层括号与引号,逐项 netip.ParsePrefix;裸地址按单主机网段(/32、/128)处理,其余丢掉。
+func wireGuardAllowedIPs(v interface{}) []string {
+	var out []string
+	for _, s := range wireGuardStringList(v) {
+		s = strings.Trim(s, "[]'\" ")
+		if _, err := netip.ParsePrefix(s); err == nil {
+			out = append(out, s)
+		} else if addr, err := netip.ParseAddr(s); err == nil {
+			out = append(out, netip.PrefixFrom(addr, addr.BitLen()).String())
+		}
 	}
 	return out
 }
