@@ -1108,7 +1108,15 @@ var builtInOutbounds = map[string]bool{
 }
 
 // isBuiltInOutbound 判断一个组成员是不是内核内置出站。
-func isBuiltInOutbound(name string) bool { return builtInOutbounds[name] }
+//
+// **大小写不敏感**:模板里写 `direct` / `Direct` 的人不少,而这张表存的是大写。
+// 精确匹配会让小写那份被当成普通节点名,filter 一筛就没了 —— 用户明明在模板里
+// 显式加了 direct,产出的组里却看不到(许可证站 #951)。
+// 判错的代价不对称:多留一个成员最多是 mihomo 自己忽略它,漏判则是静默删掉
+// 用户显式写的配置。
+func isBuiltInOutbound(name string) bool {
+	return builtInOutbounds[strings.ToUpper(strings.TrimSpace(name))]
+}
 
 // applyFilterPreservingGroups applies filter but preserves proxy group names
 // and built-in outbounds.

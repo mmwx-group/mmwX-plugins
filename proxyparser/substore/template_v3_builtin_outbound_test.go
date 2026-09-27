@@ -153,3 +153,37 @@ proxy-groups:
 		t.Errorf("没配 filter 的组不该有任何变化,实际 = %v", got)
 	}
 }
+
+// 模板里写小写 direct 的人不少,而 builtInOutbounds 存的是大写。
+// 精确匹配会把它当成普通节点名,filter 一筛就没了 —— 用户显式加的 direct
+// 在产出的组里看不到(许可证站 #951)。
+func TestIsBuiltInOutboundIgnoresCase(t *testing.T) {
+	for _, name := range []string{
+		"DIRECT", "direct", "Direct", " direct ",
+		"REJECT", "reject", "reject-drop", "Pass", "global",
+	} {
+		if !isBuiltInOutbound(name) {
+			t.Fatalf("%q 应当被认作内置出站", name)
+		}
+	}
+	for _, name := range []string{"香港01", "directly", "my-direct", ""} {
+		if isBuiltInOutbound(name) {
+			t.Fatalf("%q 不该被认作内置出站", name)
+		}
+	}
+}
+
+// filter 按节点名写,小写 direct 匹配不上就会被筛掉 —— 这是 #951 的实际现象。
+func TestFilterKeepsLowercaseDirect(t *testing.T) {
+	got := applyFilterPreservingGroups(
+		"HK", []string{"direct", "香港01", "日本01"}, "香港", nil)
+	found := false
+	for _, p := range got {
+		if p == "direct" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("小写 direct 应当被保留,得到 %v", got)
+	}
+}
