@@ -325,14 +325,7 @@ func (p *QXProducer) vmess(proxy Proxy) (string, error) {
 	result.Append(fmt.Sprintf("vmess=%s:%d", GetString(proxy, "server"), GetInt(proxy, "port")))
 
 	// cipher
-	cipher := GetString(proxy, "cipher")
-	if cipher == "auto" {
-		cipher = "chacha20-ietf-poly1305"
-	}
-	if cipher == "" {
-		cipher = "chacha20-ietf-poly1305"
-	}
-	result.Append(fmt.Sprintf(",method=%s", cipher))
+	result.Append(fmt.Sprintf(",method=%s", qxFormatVmessMethod(GetString(proxy, "cipher"))))
 
 	result.Append(fmt.Sprintf(",password=%s", GetString(proxy, "uuid")))
 
@@ -682,4 +675,40 @@ func (p *QXProducer) getFirstStringValue(value any) string {
 		}
 	}
 	return ""
+}
+
+
+// qxVmessMethodValues 镜像 JS 的 VMESS_SECURITY_QX_METHOD_VALUES ——
+// Quantumult X 的 vmess **只认这两个** method 值。
+var qxVmessMethodValues = []string{"none", "chacha20-poly1305"}
+
+// qxVmessSecurityAliases 镜像 JS 的 VMESS_SECURITY_ALIASES。
+// clash 侧写 chacha20-ietf-poly1305,QX 写 chacha20-poly1305,同一个算法两种拼法。
+var qxVmessSecurityAliases = map[string]string{
+	"chacha20-ietf-poly1305": "chacha20-poly1305",
+}
+
+// qxFormatVmessMethod 镜像 JS 的 formatQXVmessMethod。
+//
+// 从前这里把 cipher 原样透出去,只把 auto / 空串换成 "chacha20-ietf-poly1305" ——
+// 而那个值 QX 根本不认。于是 clash 侧最常见的两种配置(cipher: auto、aes-128-gcm)
+// 产出的 server_local 行全是坏的,QX 解析不了整个节点,用户看到的就是「QX 模板不可用」。
+//
+// 回落到 chacha20-poly1305 是安全的:VMess 的 security 由**客户端**决定,
+// 服务端按包头自适应,换一种客户端加密方式不需要服务端配合。
+func qxFormatVmessMethod(security string) string {
+	const fallback = "chacha20-poly1305"
+	normalized := strings.ToLower(strings.TrimSpace(security))
+	if normalized == "" {
+		return fallback
+	}
+	if alias, ok := qxVmessSecurityAliases[normalized]; ok {
+		normalized = alias
+	}
+	for _, v := range qxVmessMethodValues {
+		if v == normalized {
+			return normalized
+		}
+	}
+	return fallback
 }
