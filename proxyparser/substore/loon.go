@@ -295,7 +295,7 @@ func (p *LoonProducer) vmess(proxy Proxy, _ bool) (string, error) {
 		GetString(proxy, "name"),
 		GetString(proxy, "server"),
 		GetInt(proxy, "port"),
-		GetString(proxy, "cipher"),
+		loonFormatVmessSecurity(GetString(proxy, "cipher")),
 		GetString(proxy, "uuid")))
 
 	network := GetString(proxy, "network")
@@ -887,4 +887,18 @@ func (p *LoonProducer) appendShadowTLS(result *Result, proxy Proxy) error {
 		}
 	}
 	return nil
+}
+
+
+// loonFormatVmessSecurity 镜像 JS 的 formatLoonVmessSecurity。
+//
+// 先按 clash 的支持值归一(不认的回落 auto),再把 chacha20-poly1305 换成 Loon 用的
+// ietf 拼法。从前这里把 cipher 原样透出 —— clash 配置里合法的 chacha20-poly1305
+// 到了 Loon 就不认,和 QX 那处是同一次移植漏的同类问题。
+func loonFormatVmessSecurity(security string) string {
+	normalized := clashNormalizeVmessSecurity(security)
+	if normalized == "chacha20-poly1305" {
+		return "chacha20-ietf-poly1305"
+	}
+	return normalized
 }

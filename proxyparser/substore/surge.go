@@ -264,6 +264,11 @@ func (p *SurgeProducer) vmess(proxy Proxy, includeUnsupported bool) (string, err
 		GetInt(proxy, "port")))
 
 	result.AppendIfPresent(`,username=%s`, "uuid")
+	// encrypt-method 从前整个漏掉了(JS 侧一直在写)。auto 按 JS 的约定不输出,
+	// 交给 Surge 自己挑;其余按它认的拼法写出来。
+	if m := surgeFormatVmessEncryptMethod(GetString(proxy, "cipher")); m != "" {
+		result.Append(fmt.Sprintf(",encrypt-method=%s", m))
+	}
 	p.appendIPVersion(result, proxy)
 	p.appendCommonOptions(result, proxy)
 	p.handleTransport(result, proxy, includeUnsupported)
@@ -820,4 +825,38 @@ func (p *SurgeProducer) handleTransport(result *Result, proxy Proxy, includeUnsu
 	}
 
 	return nil
+}
+
+
+// surgeVmessEncryptValues 镜像 JS formatSurgeVmessEncryptMethod 的支持值。
+var surgeVmessEncryptValues = []string{"aes-128-gcm", "chacha20-poly1305"}
+
+// surgeFormatVmessEncryptMethod 镜像 JS 的 formatSurgeVmessEncryptMethod。
+//
+// 返回空串表示**不输出**这个字段(JS 里是 undefined):归一后是 auto 就交给 Surge
+// 自己挑。命中 chacha20-poly1305 时换成 Surge 用的 ietf 拼法。
+func surgeFormatVmessEncryptMethod(security string) string {
+	normalized := strings.ToLower(strings.TrimSpace(security))
+	const fallback = "auto"
+	if normalized == "" {
+		normalized = fallback
+	}
+	if alias, ok := clashVmessSecurityAliases[normalized]; ok {
+		normalized = alias
+	}
+	matched := ""
+	for _, v := range surgeVmessEncryptValues {
+		if v == normalized {
+			matched = v
+			break
+		}
+	}
+	if matched == "" {
+		// 白名单外一律按 auto 处理 —— 与 JS 的 normalizeVmessSecurity fallback 一致。
+		return ""
+	}
+	if matched == "chacha20-poly1305" {
+		return "chacha20-ietf-poly1305"
+	}
+	return matched
 }
