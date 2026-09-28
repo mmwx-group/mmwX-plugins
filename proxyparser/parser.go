@@ -1016,7 +1016,7 @@ func parseHysteriaGeneric(uri string, protocol string) (map[string]any, error) {
 	password := unescapeKeepPlus(mainPart[:atIdx])
 	serverPart := mainPart[atIdx+1:]
 
-	server, port := parseServerPortWithDefault(serverPart, 0)
+	server, port, hopPorts := parseServerPortHop(serverPart)
 
 	node := map[string]any{
 		"name":     name,
@@ -1070,7 +1070,10 @@ func parseHysteriaGeneric(uri string, protocol string) (map[string]any, error) {
 		node["down"] = downmbps
 	}
 
-	// Port hopping（mport / ports 别名）
+	// Port hopping：authority 中的端口范围/列表（如 443,20000-30000），query 的 mport / ports 优先
+	if hopPorts != "" {
+		node["ports"] = hopPorts
+	}
 	if ports := firstNonEmpty(queryParams, "mport", "ports"); ports != "" {
 		node["ports"] = ports
 	}
@@ -1885,6 +1888,30 @@ func parseServerPortWithDefault(serverPart string, defaultPort int) (string, int
 	}
 
 	return server, port
+}
+
+// portHopRe 匹配端口跳跃写法：单个范围或逗号分隔的端口/范围列表（如 20000-30000、443,20000-30000）。
+var portHopRe = regexp.MustCompile(`^\d+(-\d+)?(,\d+(-\d+)?)*$`)
+
+// parseServerPortHop 解析 host:port，port 段允许端口跳跃写法：
+// port 取第一个端口/范围起点，hopPorts 返回完整端口串；普通单端口时 hopPorts 为空。
+func parseServerPortHop(serverPart string) (server string, port int, hopPorts string) {
+	hostPart, portPart := serverPart, ""
+	if strings.HasPrefix(serverPart, "[") {
+		if i := strings.Index(serverPart, "]"); i != -1 && strings.HasPrefix(serverPart[i+1:], ":") {
+			hostPart, portPart = serverPart[:i+1], serverPart[i+2:]
+		}
+	} else if i := strings.Index(serverPart, ":"); i != -1 {
+		hostPart, portPart = serverPart[:i], serverPart[i+1:]
+	}
+	if !strings.ContainsAny(portPart, ",-") || !portHopRe.MatchString(portPart) {
+		server, port = parseServerPortWithDefault(serverPart, 0)
+		return server, port, ""
+	}
+	server, _ = parseServerPortWithDefault(hostPart, 0)
+	first := strings.FieldsFunc(portPart, func(r rune) bool { return r == ',' || r == '-' })
+	port, _ = strconv.Atoi(first[0])
+	return server, port, portPart
 }
 
 func isIPv4(s string) bool {
