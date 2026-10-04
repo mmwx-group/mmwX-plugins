@@ -1,6 +1,11 @@
 package proxyparser
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
+)
 
 // 官方 mieru 客户端导出的链接:scheme 带 s、端口在 query 里、传输协议叫 protocol。
 // 三处任一没处理都会让节点导不进来或连不上(#115)。
@@ -47,5 +52,34 @@ func TestParseMieruLegacyURIStillWorks(t *testing.T) {
 	}
 	if node["name"] != "我的节点" {
 		t.Errorf("name = %v", node["name"])
+	}
+}
+
+// 我们输出官方简单分享链接(mierus://,端口在 query 里、可为范围、profile 作名字),
+// 自己的解析器要能原样读回 —— 面板「复制链接」再导入、或官方客户端导出后导入都走这条路。
+func TestMieruSimpleLinkRoundTrip(t *testing.T) {
+	src := substore.Proxy{
+		"name": "🇯🇵 东京 mieru", "type": "mieru", "server": "1.2.3.4", "port": 20000,
+		"port-range": "20000-20100", "transport": "UDP",
+		"username": "alice", "password": "p@ss:word/1", "multiplexing": "MULTIPLEXING_LOW",
+	}
+	uri, err := substore.NewURIProducer().ProduceOne(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(uri, "mierus://") || !strings.Contains(uri, "port=20000-20100") || !strings.Contains(uri, "protocol=UDP") {
+		t.Fatalf("应输出官方简单链接(端口范围、protocol=UDP): %s", uri)
+	}
+	node, err := Parse(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]any{
+		"name": "🇯🇵 东京 mieru", "server": "1.2.3.4", "port": 20000, "port-range": "20000-20100",
+		"transport": "UDP", "username": "alice", "password": "p@ss:word/1", "multiplexing": "MULTIPLEXING_LOW",
+	} {
+		if node[k] != want {
+			t.Errorf("%s = %v, want %v(uri=%s)", k, node[k], want, uri)
+		}
 	}
 }

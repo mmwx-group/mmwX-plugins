@@ -1596,7 +1596,7 @@ func parseNaiveURL(uri string) (map[string]any, error) {
 //	  - 传输协议叫 protocol,不叫 transport
 func parseMieruURL(uri string) (map[string]any, error) {
 	content := strings.TrimPrefix(strings.TrimPrefix(uri, "mierus://"), "mieru://")
-	name := "Mieru Node"
+	name := ""
 	mainPart := content
 
 	if idx := strings.LastIndex(content, "#"); idx != -1 {
@@ -1621,10 +1621,29 @@ func parseMieruURL(uri string) (map[string]any, error) {
 	server, port := parseServerPortWithDefault(serverPart, 0)
 	// host 段没带端口时从 query 取 —— 官方导出的链接就是这么写的。
 	// host 段带了就以它为准:那是更具体的写法,不该被 query 覆盖。
+	portRange := queryParams["port-range"]
 	if port == 0 {
-		if v, err := strconv.Atoi(queryParams["port"]); err == nil && v > 0 && v < 65536 {
+		qp := queryParams["port"]
+		if v, err := strconv.Atoi(qp); err == nil && v > 0 && v < 65536 {
 			port = v
+		} else if lo, hi, ok := strings.Cut(qp, "-"); ok {
+			// 官方简单链接的 port 也可以是端口范围:节点端口取第一个,范围放进 port-range
+			if a, aerr := strconv.Atoi(lo); aerr == nil && a > 0 && a < 65536 {
+				if b, berr := strconv.Atoi(hi); berr == nil && b > a && b < 65536 {
+					port = a
+					if portRange == "" {
+						portRange = qp
+					}
+				}
+			}
 		}
+	}
+	// 官方简单链接没有 #名字,profile 就是名字。
+	if name == "" {
+		name = queryParams["profile"]
+	}
+	if name == "" {
+		name = "Mieru Node"
 	}
 
 	var username, password string
@@ -1667,8 +1686,8 @@ func parseMieruURL(uri string) (map[string]any, error) {
 			node["mtu"] = mtu
 		}
 	}
-	if v := queryParams["port-range"]; v != "" {
-		node["port-range"] = v
+	if portRange != "" {
+		node["port-range"] = portRange
 	}
 	if v := queryParams["traffic-pattern"]; v != "" {
 		node["traffic-pattern"] = v

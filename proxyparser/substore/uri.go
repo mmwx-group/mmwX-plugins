@@ -1506,44 +1506,53 @@ func (p *URIProducer) encodeNaive(proxy Proxy) (string, error) {
 	return uri, nil
 }
 
+// encodeMieru 输出 mieru 官方的简单分享链接(docs/client-install.md「simple sharing link」):
+//
+//	mierus://用户名:密码@服务器?profile=..&port=..&protocol=..[&mtu=..&multiplexing=..&handshake-mode=..&traffic-pattern=..]
+//
+// profile 必须出现一次;port / protocol 成对出现(这里各一个),port 可以是端口范围。
+// 以前输出的是社区写法 mieru://user:pass@host:port/?transport=,官方客户端导入不了。
 func (p *URIProducer) encodeMieru(proxy Proxy) (string, error) {
-	name := GetString(proxy, "name")
 	server := GetString(proxy, "server")
-	port := GetInt(proxy, "port")
-	username := GetString(proxy, "username")
-	password := GetString(proxy, "password")
-
 	if server == "" {
 		return "", fmt.Errorf("missing server")
 	}
+	port := GetString(proxy, "port-range")
+	if port == "" {
+		if n := GetInt(proxy, "port"); n > 0 {
+			port = fmt.Sprintf("%d", n)
+		}
+	}
+	if port == "" {
+		return "", fmt.Errorf("missing port")
+	}
 
-	auth := url.PathEscape(username) + ":" + url.PathEscape(password)
+	profile := GetString(proxy, "name")
+	if profile == "" {
+		profile = "default"
+	}
+	protocol := strings.ToUpper(GetString(proxy, "transport"))
+	if protocol != "UDP" {
+		protocol = "TCP"
+	}
 
 	params := url.Values{}
-	if transport := GetString(proxy, "transport"); transport != "" {
-		params.Set("transport", transport)
+	params.Set("profile", profile)
+	params.Set("port", port)
+	params.Set("protocol", protocol)
+	if mtu := GetInt(proxy, "mtu"); mtu > 0 {
+		params.Set("mtu", fmt.Sprintf("%d", mtu))
 	}
 	if multiplexing := GetString(proxy, "multiplexing"); multiplexing != "" {
 		params.Set("multiplexing", multiplexing)
 	}
-	if mtu := GetInt(proxy, "mtu"); mtu > 0 {
-		params.Set("mtu", fmt.Sprintf("%d", mtu))
-	}
-	if portRange := GetString(proxy, "port-range"); portRange != "" {
-		params.Set("port-range", portRange)
+	if hm := GetString(proxy, "handshake-mode"); hm != "" {
+		params.Set("handshake-mode", hm)
 	}
 	if tp := GetString(proxy, "traffic-pattern"); tp != "" {
 		params.Set("traffic-pattern", tp)
 	}
 
-	var serverPart string
-	if port > 0 {
-		serverPart = fmt.Sprintf("%s:%d", server, port)
-	} else {
-		serverPart = server
-	}
-
-	uri := fmt.Sprintf("mieru://%s@%s/?%s", auth, serverPart, params.Encode())
-	uri += "#" + url.PathEscape(name)
-	return uri, nil
+	userinfo := url.UserPassword(GetString(proxy, "username"), GetString(proxy, "password")).String()
+	return fmt.Sprintf("mierus://%s@%s?%s", userinfo, server, params.Encode()), nil
 }

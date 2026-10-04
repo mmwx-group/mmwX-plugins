@@ -193,6 +193,12 @@ func (p *ClashMetaProducer) Produce(proxies []Proxy, outputType string, opts *Pr
 				transformed["version"] = 5
 			}
 
+		case "mieru":
+			// mihomo 规定 port 与 port-range 不能同时写:有范围就只留范围。
+			if GetString(transformed, "port-range") != "" {
+				delete(transformed, "port")
+			}
+
 		case "hysteria":
 			// Handle auth_str -> auth-str
 			if IsPresent(transformed, "auth_str") && !IsPresent(transformed, "auth-str") {
