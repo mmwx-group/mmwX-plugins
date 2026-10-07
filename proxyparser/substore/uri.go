@@ -75,6 +75,17 @@ func uriEncodeUserInfo(s string) string {
 	return uriEscapeExcept(s, "-._~!$&'()*,;=:")
 }
 
+// uriEncodeSS2022Password 同 uriEncodeUserInfo,但 ':' 也编成 %3A。
+//
+// SS2022 单端口多用户的密码是「服务器PSK:用户PSK」。userinfo 是 method:password,密码里的 ':'
+// 不编码就成了 method:服务器PSK:用户PSK,三段两个冒号 —— 按冒号切的导入端各取各的:
+// Loon 只留第二段(丢用户 PSK),sing-box 那边的转换只留最后一段(丢服务器 PSK),节点都连不上。
+// SIP002 要求 2022 的 method、password 都做百分号编码,Sub-Store 也是 encodeURIComponent,
+// 这里与之对齐;'=' 等其余合法 userinfo 字符照旧保留。
+func uriEncodeSS2022Password(s string) string {
+	return uriEscapeExcept(s, "-._~!$&'()*,;=")
+}
+
 // uriEncodeTrojanPassword 同 uriEncodeUserInfo,但 '+' 保持字面量。trojan 的导入端都不按
 // 表单解码:≤v0.2.7 原样读,新版 / Sub-Store / mihomo 按 RFC 3986 解,编成 %2B 谁也不帮,
 // 只会让 ≤v0.2.7 读到 "%2B"(base64 风格的自定义密码最常见)。
@@ -834,7 +845,7 @@ func (p *URIProducer) encodeShadowsocks(proxy Proxy) (string, error) {
 	// userinfo: 2022-blake3-* 不 base64 (JS line 828-832)
 	var userInfoPart string
 	if strings.HasPrefix(cipher, "2022-blake3-") {
-		userInfoPart = uriEncodeUserInfo(cipher) + ":" + uriEncodeUserInfo(password)
+		userInfoPart = uriEncodeUserInfo(cipher) + ":" + uriEncodeSS2022Password(password)
 	} else {
 		userInfoPart = base64.StdEncoding.EncodeToString([]byte(cipher + ":" + password))
 	}

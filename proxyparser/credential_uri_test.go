@@ -377,3 +377,29 @@ func TestSSPluginOptsKeepPlus(t *testing.T) {
 		}
 	}
 }
+
+// SS2022 单端口多用户的密码是「服务器PSK:用户PSK」。从前导出成 method:服务器PSK:用户PSK,
+// userinfo 里两个冒号,按冒号切的导入端各取各的:Loon 只留服务器 PSK,sing-box 侧的转换只留用户 PSK,
+// 节点都连不上。密码里的 ':' 必须编成 %3A,userinfo 只留 method 后面那一个冒号。
+func TestSS2022MultiUserExportEscapesPasswordColon(t *testing.T) {
+	const psk = "5V73ImiDfE+FJGOU7q1JSQ==:QUJDREVGR0hJSktMTU5PUA=="
+	uri, err := substore.NewURIProducer().ProduceOne(substore.Proxy{"type": "ss", "name": "PO0 HK",
+		"server": "1.2.3.4", "port": 443, "cipher": "2022-blake3-aes-128-gcm", "password": psk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	userinfo := strings.TrimPrefix(uri, "ss://")
+	userinfo = userinfo[:strings.LastIndex(userinfo, "@")]
+	parts := strings.Split(userinfo, ":")
+	if len(parts) != 2 {
+		t.Fatalf("userinfo 应只有 method 后一个冒号,实得 %d 段: %s", len(parts), userinfo)
+	}
+	// 按冒号切的导入端:取第二段(也是最后一段)再做百分号解码,必须拿回完整的两段 PSK
+	got, err := url.PathUnescape(parts[1])
+	if err != nil || got != psk {
+		t.Fatalf("按冒号切再解码 = %q (err=%v), want %q", got, err, psk)
+	}
+	if node, err := Parse(uri); err != nil || node["password"] != psk {
+		t.Fatalf("自家导入端读回 = %v (err=%v), want %q", node["password"], err, psk)
+	}
+}
