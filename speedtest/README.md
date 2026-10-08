@@ -44,6 +44,9 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 <details>
 <summary>更新日志</summary>
 
+### v0.1.8 (2026-10-08)
+- 🛠️ fix: 内核下载半路被掐(unexpected EOF)就整个失败 —— 改为断点续传、最多续 6 次;首次没下到带 Miu 的内核时先用官方内核,后台每 10 分钟重试,下到即换上,不用重启
+
 ### v0.1.7 (2026-10-08)
 - 🛠️ fix: 测速端启动后主控一直显示离线、终端无输出 —— 启动时先下完 mihomo 内核才去连主控,GitHub 下得慢(家用路由器、国内线路)时要卡好几分钟甚至卡死。改为先连主控,内核放后台准备并打印进度
 
