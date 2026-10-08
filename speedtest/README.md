@@ -44,6 +44,11 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 <details>
 <summary>更新日志</summary>
 
+### v0.1.6 (2026-10-08)
+- 🌈 测速端支持 Miu 节点:优先用带 Miu 出站的 mihomo(本仓库 mihomo-miu-* release 的预编译包,本地缓存 / PATH 里的内核不带 Miu 就自动换),下不到再退回官方内核;附构建脚本 scripts/build-mihomo-miu.sh(从 meowC 的内核源码编,恢复被客户端壳注释掉的监听启动)
+- 🌈 测速端:中转抓取外部订阅 + 修延迟口径不一致
+- 🌈 测速端远程一键更新:上报版本与平台、校验 checksums.txt 后自更新并重启(Docker 下新版落在 /data 卷);安装脚本改从 mmwx-group/mmwX-plugins 按 speedtest-v* 取最新版;release tag 统一为 speedtest-vX.Y.Z
+
 ### vv0.1.5 (2026-07-26)
 - fix 没有ipv6检测误报
 
