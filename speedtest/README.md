@@ -44,6 +44,9 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 <details>
 <summary>更新日志</summary>
 
+### v0.1.7 (2026-10-08)
+- 🛠️ fix: 测速端启动后主控一直显示离线、终端无输出 —— 启动时先下完 mihomo 内核才去连主控,GitHub 下得慢(家用路由器、国内线路)时要卡好几分钟甚至卡死。改为先连主控,内核放后台准备并打印进度
+
 ### v0.1.6 (2026-10-08)
 - 🌈 测速端支持 Miu 节点:优先用带 Miu 出站的 mihomo(本仓库 mihomo-miu-* release 的预编译包,本地缓存 / PATH 里的内核不带 Miu 就自动换),下不到再退回官方内核;附构建脚本 scripts/build-mihomo-miu.sh(从 meowC 的内核源码编,恢复被客户端壳注释掉的监听启动)
 - 🌈 测速端:中转抓取外部订阅 + 修延迟口径不一致
