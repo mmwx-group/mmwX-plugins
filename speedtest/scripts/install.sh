@@ -3,7 +3,7 @@
 # Usage: curl -fsSL <url>/install.sh | bash -s -- -master https://your-master-url -token <token>
 set -e
 
-REPO="MMWOrg/mmwX-plugins"
+REPO="mmwx-group/mmwX-plugins"
 BINARY_NAME="mmwx-speedtester"
 INSTALL_DIR="."
 
@@ -53,20 +53,20 @@ get_download_url() {
   fi
 
   echo "Fetching latest release..."
-  local release_url="https://api.github.com/repos/${REPO}/releases/latest"
+  local release_url="https://api.github.com/repos/${REPO}/releases?per_page=30"
   local release_json
   release_json=$(curl -fsSL "$release_url") || {
     echo "Failed to fetch release info"; exit 1
   }
 
-  DOWNLOAD_URL=$(echo "$release_json" | grep -o "\"browser_download_url\": *\"[^\"]*${asset_name}\"" | head -1 | cut -d'"' -f4)
+  DOWNLOAD_URL=$(echo "$release_json" | grep -o "\"browser_download_url\": *\"[^\"]*/download/speedtest-v[^\"]*/${asset_name}\"" | head -1 | cut -d'"' -f4)
   if [ -z "$DOWNLOAD_URL" ]; then
     echo "Asset ${asset_name} not found."
     echo "Visit https://github.com/${REPO}/releases/latest to download manually."
     exit 1
   fi
 
-  VERSION=$(echo "$release_json" | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)
+  VERSION=$(echo "$release_json" | grep -o '"tag_name": *"speedtest-v[^"]*"' | head -1 | cut -d'"' -f4)
   echo "Latest version: ${VERSION}"
 }
 

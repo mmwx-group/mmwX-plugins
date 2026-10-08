@@ -6,7 +6,7 @@
 #     -e MMWX_SPEEDTEST_TOKEN=<token> \
 #     -e MMWX_SPEEDTEST_NAME=home-tester \
 #     -v mmwx-speedtester-data:/data \
-#     ghcr.io/iluobei/mmwx-speedtester:latest
+#     ghcr.io/mmwx-group/mmwx-speedtester:latest
 #
 # 持久 volume /data 用于缓存 mihomo 二进制(避免每次重启都重新从 GitHub Release 下载)。
 # 必须能出网访问:主控 WS、GitHub Release(拉 mihomo)、测速目标(Cloudflare 等)。
@@ -30,10 +30,12 @@ RUN apk add --no-cache ca-certificates tzdata && \
     mkdir -p /data && chown speedtest:speedtest /data
 
 COPY --from=builder /out/mmwx-speedtester /usr/local/bin/mmwx-speedtester
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 USER speedtest
 WORKDIR /data
 VOLUME ["/data"]
 
 # 不写默认 ENV(强制运行时显式传入,避免空 token 起容器后无限报错)
-ENTRYPOINT ["/usr/local/bin/mmwx-speedtester"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

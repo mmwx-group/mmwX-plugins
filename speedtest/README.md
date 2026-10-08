@@ -24,6 +24,13 @@ mmwx-speedtester-windows-amd64.exe -master https://你的主控地址 -token <�
 
 > 首次测速会自动下载对应平台的 mihomo 内核(缓存到运行目录的 `data/bin/`)。
 
+## 更新
+
+支持远程更新的测速端会向主控上报版本和运行平台。发布新的 `speedtest-v*` Release 后，
+主控「节点测速 → 管理测速端」会显示“一键更新”，并在校验 `checksums.txt` 后更新所有在线测速端。
+旧版测速端需要先按安装命令手动升级一次；旧 Docker 容器也需要重建一次，之后更新文件会保存在
+`/data` 卷中，容器重启后仍会使用新版。
+
 ## 构建
 
 ```bash

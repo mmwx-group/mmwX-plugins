@@ -6,7 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = "MMWOrg/mmwX-plugins"
+$Repo = "mmwx-group/mmwX-plugins"
 $BinaryName = "mmwx-speedtester"
 
 # Detect architecture
@@ -21,8 +21,8 @@ Write-Host "Platform: windows/${Arch}"
 
 # Get latest release
 Write-Host "Fetching latest release..."
-$ReleaseUrl = "https://api.github.com/repos/${Repo}/releases/latest"
-$Release = Invoke-RestMethod -Uri $ReleaseUrl -Headers @{ "User-Agent" = "mmwx-installer" }
+$ReleaseUrl = "https://api.github.com/repos/${Repo}/releases?per_page=30"
+$Release = (Invoke-RestMethod -Uri $ReleaseUrl -Headers @{ "User-Agent" = "mmwx-installer" } | Where-Object { $_.tag_name -like 'speedtest-v*' } | Select-Object -First 1)
 Write-Host "Latest version: $($Release.tag_name)"
 
 $Asset = $Release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
