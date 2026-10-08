@@ -133,7 +133,8 @@ func EnsureMihomo(ctx context.Context) (string, error) {
 		cachedPath = local
 		return local, nil
 	} else {
-		log.Printf("[warn] 带 Miu 的 mihomo 下载失败,改用官方内核(Miu 节点测不了): %v", err)
+		log.Printf("[warn] 带 Miu 的 mihomo 下载失败,先用官方内核(Miu 节点暂时测不了),后台每 10 分钟重试: %v", err)
+		miuRetryOnce.Do(func() { go retryMiuDownload(local) })
 	}
 	if localOK {
 		cachedPath = local
@@ -149,6 +150,26 @@ func EnsureMihomo(ctx context.Context) (string, error) {
 	}
 	cachedPath = local
 	return local, nil
+}
+
+var miuRetryOnce sync.Once
+
+// retryMiuDownload 首次没下到带 Miu 的内核时在后台接着试,下到就换上(之后的测速直接用新的)。
+func retryMiuDownload(local string) {
+	for {
+		time.Sleep(10 * time.Minute)
+		mihomoMu.Lock()
+		err := downloadMiuMihomo(context.Background(), local)
+		if err == nil {
+			cachedPath = local
+		}
+		mihomoMu.Unlock()
+		if err == nil {
+			log.Printf("[speedtester] 带 Miu 的 mihomo 内核已就绪: %s", local)
+			return
+		}
+		log.Printf("[warn] 带 Miu 的 mihomo 仍未下到: %v", err)
+	}
 }
 
 // MihomoStatus 报告 mihomo 是否就绪及来源(供 UI 展示)。
@@ -259,15 +280,16 @@ func downloadMihomoAsset(ctx context.Context, assetURL, assetName, dst string) e
 		return err
 	}
 	log.Printf("[speedtester] 下载内核 %s ...", assetName)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
-	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
-	if err != nil {
+	dl := dst + ".dl"
+	defer os.Remove(dl)
+	if err := fetchWithResume(ctx, assetURL, dl); err != nil {
 		return fmt.Errorf("下载 %s: %w", assetName, err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载 %s HTTP %d", assetName, resp.StatusCode)
+	body, err := os.Open(dl)
+	if err != nil {
+		return err
 	}
+	defer body.Close()
 
 	tmp := dst + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
@@ -276,7 +298,7 @@ func downloadMihomoAsset(ctx context.Context, assetURL, assetName, dst string) e
 	}
 	if strings.HasSuffix(assetName, ".zip") {
 		// zip:读入内存,取首个 .exe 条目写出。
-		data, rerr := io.ReadAll(resp.Body)
+		data, rerr := io.ReadAll(body)
 		if rerr != nil {
 			f.Close()
 			os.Remove(tmp)
@@ -312,7 +334,7 @@ func downloadMihomoAsset(ctx context.Context, assetURL, assetName, dst string) e
 			return fmt.Errorf("zip 内未找到 .exe")
 		}
 	} else {
-		gz, gerr := gzip.NewReader(resp.Body)
+		gz, gerr := gzip.NewReader(body)
 		if gerr != nil {
 			f.Close()
 			os.Remove(tmp)
@@ -332,6 +354,64 @@ func downloadMihomoAsset(ctx context.Context, assetURL, assetName, dst string) e
 		return err
 	}
 	return nil
+}
+
+// fetchWithResume 把 url 下到 path,断了就带 Range 接着下,最多试 6 次。
+// 家用线路连 GitHub 的大文件经常半路被掐(unexpected EOF),整包重来几乎下不完。
+func fetchWithResume(ctx context.Context, url, path string) error {
+	os.Remove(path)
+	client := &http.Client{Timeout: 10 * time.Minute}
+	var lastErr error
+	for attempt := 1; attempt <= 6; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * 2 * time.Second):
+			}
+		}
+		var have int64
+		if st, err := os.Stat(path); err == nil {
+			have = st.Size()
+		}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if have > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		flag := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+		switch {
+		case resp.StatusCode == http.StatusOK:
+			flag = os.O_CREATE | os.O_WRONLY | os.O_TRUNC // 服务端不认 Range,从头来
+		case resp.StatusCode == http.StatusPartialContent && have > 0:
+		case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && have > 0:
+			resp.Body.Close()
+			return nil // 已经下完了
+		default:
+			resp.Body.Close()
+			return fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		f, err := os.OpenFile(path, flag, 0644)
+		if err != nil {
+			resp.Body.Close()
+			return err
+		}
+		_, err = io.Copy(f, resp.Body)
+		resp.Body.Close()
+		f.Close()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if st, serr := os.Stat(path); serr == nil {
+			log.Printf("[speedtester] 下载中断(%v),已下 %d 字节,第 %d 次续传...", err, st.Size(), attempt)
+		}
+	}
+	return lastErr
 }
 
 type ghRelease struct {
