@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -69,6 +70,22 @@ func mihomoSupportsSnell(bin string) bool {
 	return versionGTE(v, minMihomoVersion)
 }
 
+// miuCoreRepo:带 Miu 协议出站的 mihomo(源码在公开仓 mmwx-group/meowC 的 core/Clash.Meta)
+// 的预编译包发在这个仓库,tag 形如 mihomo-miu-<版本>,资源名 mihomo-miu-<os>-<arch>.gz。
+// 官方 mihomo 不认 type: miu,测 Miu 节点必须用这份。
+const (
+	miuCoreRepo      = "mmwx-group/mmwX-plugins"
+	miuCoreTagPrefix = "mihomo-miu-"
+)
+
+// mihomoSupportsMiu 看 `<bin> -v` 的输出里有没有 miu 标记(我们的构建把版本号写成 miu-<提交>)。
+func mihomoSupportsMiu(bin string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, bin, "-v").CombinedOutput()
+	return strings.Contains(strings.ToLower(string(out)), "miu")
+}
+
 // mihomoBinName 平台相关的 mihomo 可执行文件名(Windows 带 .exe)。
 func mihomoBinName() string {
 	if runtime.GOOS == "windows" {
@@ -83,7 +100,11 @@ var (
 )
 
 // EnsureMihomo 返回可用的 mihomo 二进制路径;按序尝试:env MIHOMO_BIN → data/bin/mihomo →
-// $PATH → 从 GitHub releases 自动下载到 data/bin/mihomo。
+// $PATH → 自动下载到 data/bin/mihomo。
+//
+// 优先要带 Miu 的内核:本地缓存 / $PATH 里的不带 Miu 就先去下我们的包;下不到(还没发布、
+// 没有当前平台的包、网络不通)再退回原来的路子 —— 用现成的官方内核或下官方最新,此时除 Miu
+// 以外的节点照常能测。MIHOMO_BIN 是用户明确指定的,不替他换。
 func EnsureMihomo(ctx context.Context) (string, error) {
 	mihomoMu.Lock()
 	defer mihomoMu.Unlock()
@@ -97,13 +118,30 @@ func EnsureMihomo(ctx context.Context) (string, error) {
 		return p, nil
 	}
 	local := filepath.Join(mihomoCacheDir, mihomoBinName())
-	if fileExists(local) && mihomoSupportsSnell(local) {
+	localOK := fileExists(local) && mihomoSupportsSnell(local)
+	if localOK && mihomoSupportsMiu(local) {
 		cachedPath = local
 		return local, nil
 	}
-	if p, err := exec.LookPath("mihomo"); err == nil && mihomoSupportsSnell(p) {
-		cachedPath = p
-		return p, nil
+	pathBin, perr := exec.LookPath("mihomo")
+	pathOK := perr == nil && mihomoSupportsSnell(pathBin)
+	if pathOK && mihomoSupportsMiu(pathBin) {
+		cachedPath = pathBin
+		return pathBin, nil
+	}
+	if err := downloadMiuMihomo(ctx, local); err == nil {
+		cachedPath = local
+		return local, nil
+	} else {
+		log.Printf("[warn] 带 Miu 的 mihomo 下载失败,改用官方内核(Miu 节点测不了): %v", err)
+	}
+	if localOK {
+		cachedPath = local
+		return local, nil
+	}
+	if pathOK {
+		cachedPath = pathBin
+		return pathBin, nil
 	}
 	// 自动下载最新(支持 snell)。若 data/bin 里是旧版会被覆盖。
 	if err := downloadMihomo(ctx, local); err != nil {
@@ -172,6 +210,51 @@ func downloadMihomo(ctx context.Context, dst string) error {
 		return fmt.Errorf("未找到匹配 %s/%s 的 mihomo release 资源", goos, archToken)
 	}
 
+	return downloadMihomoAsset(ctx, assetURL, assetName, dst)
+}
+
+// pickMiuAsset 在一批 release 里找最新的 mihomo-miu-* 里匹配平台的资源(列表接口按时间倒序)。
+func pickMiuAsset(rels []ghRelease, goos, goarch string) (url, name string) {
+	want := fmt.Sprintf("mihomo-miu-%s-%s.gz", goos, goarch)
+	for _, rel := range rels {
+		if !strings.HasPrefix(rel.TagName, miuCoreTagPrefix) {
+			continue
+		}
+		for _, a := range rel.Assets {
+			if a.Name == want {
+				return a.BrowserDownloadURL, a.Name
+			}
+		}
+	}
+	return "", ""
+}
+
+// downloadMiuMihomo 下载带 Miu 的 mihomo 到 dst。各平台都是 .gz 单二进制。
+func downloadMiuMihomo(ctx context.Context, dst string) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+miuCoreRepo+"/releases?per_page=30", nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "miaomiaowux-speedtest")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("查询 release: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("查询 release HTTP %d", resp.StatusCode)
+	}
+	var rels []ghRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
+		return err
+	}
+	assetURL, assetName := pickMiuAsset(rels, runtime.GOOS, runtime.GOARCH)
+	if assetURL == "" {
+		return fmt.Errorf("没有匹配 %s/%s 的 mihomo-miu 包", runtime.GOOS, runtime.GOARCH)
+	}
+	return downloadMihomoAsset(ctx, assetURL, assetName, dst)
+}
+
+// downloadMihomoAsset 下载一个 release 资源并解到 dst:.zip 取其中的 .exe,其余按 .gz 单二进制。
+func downloadMihomoAsset(ctx context.Context, assetURL, assetName, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
@@ -190,7 +273,7 @@ func downloadMihomo(ctx context.Context, dst string) error {
 	if err != nil {
 		return err
 	}
-	if goos == "windows" {
+	if strings.HasSuffix(assetName, ".zip") {
 		// zip:读入内存,取首个 .exe 条目写出。
 		data, rerr := io.ReadAll(resp.Body)
 		if rerr != nil {
