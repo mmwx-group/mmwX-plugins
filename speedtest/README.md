@@ -44,6 +44,9 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 <details>
 <summary>更新日志</summary>
 
+### v0.1.9 (2026-10-08)
+- 🛠️ fix: 路由器上内核下载地址连不上(Get ...: EOF)—— 后几次重试改走 HTTP/1.1,仍不行则换系统的 curl / wget(带续传)下载;每次连接失败打印原因
+
 ### v0.1.8 (2026-10-08)
 - 🛠️ fix: 内核下载半路被掐(unexpected EOF)就整个失败 —— 改为断点续传、最多续 6 次;首次没下到带 Miu 的内核时先用官方内核,后台每 10 分钟重试,下到即换上,不用重启
 
