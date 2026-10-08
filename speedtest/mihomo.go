@@ -258,6 +258,7 @@ func downloadMihomoAsset(ctx context.Context, assetURL, assetName, dst string) e
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
+	log.Printf("[speedtester] 下载内核 %s ...", assetName)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
 	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
 	if err != nil {

@@ -103,12 +103,21 @@ func main() {
 		log.Fatalf("解析 master 地址失败: %v", err)
 	}
 
-	// 预热:确保 mihomo 可用(没有则自动下载)。
-	if _, err := EnsureMihomo(context.Background()); err != nil {
-		log.Printf("[warn] mihomo 预热失败(测速时会重试): %v", err)
-	}
-
 	log.Printf("[speedtester] %s 启动,主控=%s", *name, *master)
+
+	// 预热:确保 mihomo 可用(没有则自动下载)。放后台做,不挡连主控 —— 内核要从 GitHub 下
+	// 二十多 MB,网络差的地方(家用路由器、国内线路)要好几分钟甚至下不动,原先下完才去连主控,
+	// 这段时间主控上一直显示离线、终端也没有任何输出。测速任务到达时会等它(同一把锁)。
+	go func() {
+		log.Printf("[speedtester] 正在准备 mihomo 内核(首次需要从 GitHub 下载,期间可以正常连主控)...")
+		bin, err := EnsureMihomo(context.Background())
+		if err != nil {
+			log.Printf("[warn] mihomo 预热失败(测速时会重试): %v", err)
+			return
+		}
+		log.Printf("[speedtester] mihomo 内核就绪: %s", bin)
+	}()
+
 	log.Printf("[speedtester] 拨号目标 %s", maskedURL(wsURL))
 
 	// 指数退避重连:1s → 2s → 4s ... 封顶 60s。connectAndServe 内每次成功握手后会通过
