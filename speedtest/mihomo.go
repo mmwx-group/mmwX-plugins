@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -283,7 +284,11 @@ func downloadMihomoAsset(ctx context.Context, assetURL, assetName, dst string) e
 	dl := dst + ".dl"
 	defer os.Remove(dl)
 	if err := fetchWithResume(ctx, assetURL, dl); err != nil {
-		return fmt.Errorf("下载 %s: %w", assetName, err)
+		// 自带的下载器连不上时换系统的 curl / wget 再试:有的路由器上(透明代理、中间盒)
+		// Go 的 HTTPS 连接建不起来(Get ...: EOF),而同一台机器上 curl 能下。
+		if terr := fetchWithSystemTool(ctx, assetURL, dl); terr != nil {
+			return fmt.Errorf("下载 %s: %w(curl/wget: %v)", assetName, err, terr)
+		}
 	}
 	body, err := os.Open(dl)
 	if err != nil {
@@ -361,8 +366,16 @@ func downloadMihomoAsset(ctx context.Context, assetURL, assetName, dst string) e
 func fetchWithResume(ctx context.Context, url, path string) error {
 	os.Remove(path)
 	client := &http.Client{Timeout: 10 * time.Minute}
+	// 后几次改用 HTTP/1.1:有些中间盒对 HTTP/2 处理不好,表现为连接直接被关(EOF)。
+	h1 := &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{
+		Proxy:        http.ProxyFromEnvironment,
+		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
+	}}
 	var lastErr error
 	for attempt := 1; attempt <= 6; attempt++ {
+		if attempt == 4 {
+			client = h1
+		}
 		if attempt > 1 {
 			select {
 			case <-ctx.Done():
@@ -381,6 +394,7 @@ func fetchWithResume(ctx context.Context, url, path string) error {
 		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
+			log.Printf("[speedtester] 第 %d 次连接下载地址失败: %v", attempt, err)
 			continue
 		}
 		flag := os.O_CREATE | os.O_WRONLY | os.O_APPEND
@@ -412,6 +426,30 @@ func fetchWithResume(ctx context.Context, url, path string) error {
 		}
 	}
 	return lastErr
+}
+
+// fetchWithSystemTool 用系统的 curl(没有就 wget)把 url 下到 path,带续传与重试。
+func fetchWithSystemTool(ctx context.Context, url, path string) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+	if bin, err := exec.LookPath("curl"); err == nil {
+		log.Printf("[speedtester] 改用 curl 下载...")
+		out, err := exec.CommandContext(ctx, bin, "-fsSL", "-C", "-", "--retry", "5", "--retry-delay", "3",
+			"--connect-timeout", "20", "-o", path, url).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		return fmt.Errorf("curl: %v %s", err, strings.TrimSpace(string(out)))
+	}
+	if bin, err := exec.LookPath("wget"); err == nil {
+		log.Printf("[speedtester] 改用 wget 下载...")
+		out, err := exec.CommandContext(ctx, bin, "-q", "-c", "-O", path, url).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		return fmt.Errorf("wget: %v %s", err, strings.TrimSpace(string(out)))
+	}
+	return fmt.Errorf("系统里没有 curl / wget")
 }
 
 type ghRelease struct {
