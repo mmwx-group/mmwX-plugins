@@ -71,20 +71,25 @@ func mihomoSupportsSnell(bin string) bool {
 	return versionGTE(v, minMihomoVersion)
 }
 
-// miuCoreRepo:带 Miu 协议出站的 mihomo(源码在公开仓 mmwx-group/meowC 的 core/Clash.Meta)
-// 的预编译包发在这个仓库,tag 形如 mihomo-miu-<版本>,资源名 mihomo-miu-<os>-<arch>.gz。
+// miuCoreRepo:带 Miu 协议出站的 mihomo(源码:MiuProtocol/mihomo 的 Alpha 分支 = 上游 mihomo + Miu 出站)
+// 的预编译包发在这个仓库,tag 形如 mihomo-miu-v2-<版本>,资源名 mihomo-miu-<os>-<arch>.gz。
 // 官方 mihomo 不认 type: miu,测 Miu 节点必须用这份。
+//
+// Miu 的线上格式换过一次(第二版:通道池 + 原样转发),两版互不兼容,节点现在都是第二版。
+// tag 前缀与版本标记都带上「2」:第一版的包(tag mihomo-miu-<提交>、版本号 miu-<提交>)不再被选中,
+// 本地缓存着第一版内核的测速端会自动换成第二版。
 const (
 	miuCoreRepo      = "mmwx-group/mmwX-plugins"
-	miuCoreTagPrefix = "mihomo-miu-"
+	miuCoreTagPrefix = "mihomo-miu-v2-"
+	miuCoreMarker    = "miu2-"
 )
 
-// mihomoSupportsMiu 看 `<bin> -v` 的输出里有没有 miu 标记(我们的构建把版本号写成 miu-<提交>)。
+// mihomoSupportsMiu 看 `<bin> -v` 的输出里有没有第二版 Miu 的标记(我们的构建把版本号写成 miu2-<提交>)。
 func mihomoSupportsMiu(bin string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	out, _ := exec.CommandContext(ctx, bin, "-v").CombinedOutput()
-	return strings.Contains(strings.ToLower(string(out)), "miu")
+	return strings.Contains(strings.ToLower(string(out)), miuCoreMarker)
 }
 
 // mihomoBinName 平台相关的 mihomo 可执行文件名(Windows 带 .exe)。
@@ -235,7 +240,7 @@ func downloadMihomo(ctx context.Context, dst string) error {
 	return downloadMihomoAsset(ctx, assetURL, assetName, dst)
 }
 
-// pickMiuAsset 在一批 release 里找最新的 mihomo-miu-* 里匹配平台的资源(列表接口按时间倒序)。
+// pickMiuAsset 在一批 release 里找最新的 mihomo-miu-v2-* 里匹配平台的资源(列表接口按时间倒序)。
 func pickMiuAsset(rels []ghRelease, goos, goarch string) (url, name string) {
 	want := fmt.Sprintf("mihomo-miu-%s-%s.gz", goos, goarch)
 	for _, rel := range rels {
