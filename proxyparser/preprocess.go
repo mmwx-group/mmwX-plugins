@@ -20,7 +20,7 @@ var supportedSchemes = []string{
 	"vmess://", "vless://", "ss://", "ssr://", "trojan://",
 	"hysteria://", "hysteria2://", "hy2://", "tuic://",
 	"socks://", "socks5://", "http://", "https://",
-	"wireguard://", "wg://", "anytls://",
+	"wireguard://", "wg://", "anytls://", "miu://",
 	"naive://", "naive+https://", "naive+http://", "mieru://", "mierus://", "snell://",
 }
 

@@ -141,7 +141,7 @@ func shouldApplyTlsSniFallback(node map[string]any) bool {
 	}
 	t, _ := node["type"].(string)
 	switch t {
-	case "trojan", "hysteria", "hysteria2", "tuic", "anytls":
+	case "trojan", "hysteria", "hysteria2", "tuic", "anytls", "miu":
 		return true
 	default:
 		return false
@@ -1301,6 +1301,78 @@ func parseAnytlsURL(uri string) (map[string]any, error) {
 	return node, nil
 }
 
+// parseMiuURL parses miu:// URL —— 妙妙屋自有协议(MeowX / meowC 客户端与 fork 的 xray、mihomo 支持)。
+//
+//	miu://<psk>@server:port/?sni=…&fp=…&security=reality&pbk=…&sid=…&insecure=1&alpn=h2,http/1.1&udp=1#name
+//
+// 形态与 anytls:// 相同,凭据字段是 psk(base64 或 ≥16 字节原文;认证用的是字符串本身的 sha256,
+// 所以这里不解码、不改写,只把导出端的 %XX 解回来)。传输恒为 TCP + TLS / REALITY。
+func parseMiuURL(uri string) (map[string]any, error) {
+	content := strings.TrimPrefix(uri, "miu://")
+	name := "Miu Node"
+	mainPart := content
+	if idx := strings.LastIndex(content, "#"); idx != -1 {
+		mainPart = content[:idx]
+		name, _ = url.QueryUnescape(content[idx+1:])
+	}
+	var queryParams map[string]string
+	if idx := strings.Index(mainPart, "?"); idx != -1 {
+		queryParams = parseQueryParams(mainPart[idx+1:])
+		mainPart = mainPart[:idx]
+	}
+	mainPart = strings.TrimSuffix(mainPart, "/")
+
+	atIdx := strings.LastIndex(mainPart, "@")
+	if atIdx == -1 {
+		return nil, fmt.Errorf("invalid miu url: missing @")
+	}
+	psk := unescapeKeepPlus(mainPart[:atIdx])
+	if psk == "" {
+		return nil, fmt.Errorf("invalid miu url: empty psk")
+	}
+	server, port := parseServerPortWithDefault(mainPart[atIdx+1:], 443)
+
+	node := map[string]any{
+		"name":   name,
+		"type":   "miu",
+		"server": server,
+		"port":   port,
+		"psk":    psk,
+		"udp":    queryParams["udp"] != "0",
+	}
+	if sni, ok := queryParams["sni"]; ok {
+		node["sni"] = safeDecodeURIComponent(sni)
+	} else if peer, ok := queryParams["peer"]; ok {
+		node["sni"] = safeDecodeURIComponent(peer)
+	}
+	applyTlsSniFallback(node, "sni")
+	if alpn := queryParams["alpn"]; alpn != "" {
+		node["alpn"] = strings.Split(safeDecodeURIComponent(alpn), ",")
+	}
+	scv, _ := skipCertVerify(queryParams)
+	node["skip-cert-verify"] = scv
+	if fp := queryParams["fp"]; fp != "" {
+		node["client-fingerprint"] = fp
+	}
+	if v := queryParams["idleSessionTimeout"]; v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			node["idle-session-timeout"] = i
+		}
+	}
+	if v := queryParams["minIdleSession"]; v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			node["min-idle-session"] = i
+		}
+	}
+	// REALITY 三项(security / pbk / sid)借 VLESS 解析器取,写法同 parseAnytlsURL。
+	if vlessNode, verr := parseVlessURL("vless://" + content); verr == nil {
+		if ro := vlessNode["reality-opts"]; ro != nil {
+			node["reality-opts"] = ro
+		}
+	}
+	return node, nil
+}
+
 // parseWireGuardURL parses wireguard:// or wg:// URL
 func parseWireGuardURL(uri string) (map[string]any, error) {
 	content := regexp.MustCompile(`^(wireguard|wg)://`).ReplaceAllString(uri, "")
@@ -1775,6 +1847,8 @@ func Parse(uri string) (map[string]any, error) {
 		return parseTuicURL(uri)
 	case strings.HasPrefix(uri, "anytls://"):
 		return parseAnytlsURL(uri)
+	case strings.HasPrefix(uri, "miu://"):
+		return parseMiuURL(uri)
 	case strings.HasPrefix(uri, "wireguard://"), strings.HasPrefix(uri, "wg://"):
 		return parseWireGuardURL(uri)
 	case strings.HasPrefix(uri, "http://"), strings.HasPrefix(uri, "https://"):

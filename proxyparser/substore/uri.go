@@ -341,6 +341,8 @@ func (p *URIProducer) Produce(proxies []Proxy, outputType string, opts *ProduceO
 			uri, err = p.encodeWireGuard(proxy)
 		case "anytls":
 			uri, err = p.encodeAnyTLS(proxy)
+		case "miu":
+			uri, err = p.encodeMiu(proxy)
 		case "naive":
 			uri, err = p.encodeNaive(proxy)
 		case "mieru":
@@ -1483,6 +1485,63 @@ func (p *URIProducer) encodeAnyTLS(proxy Proxy) (string, error) {
 	}
 	uri += "#" + url.PathEscape(name)
 	return uri, nil
+}
+
+// encodeMiu encodes a Miu proxy to miu:// URI(形态同 anytls://,凭据字段是 psk;与 proxyparser.parseMiuURL 往返一致)。
+// 第一版留下的 vision / recv-window 字段第二版已经不用,不导出。
+func (p *URIProducer) encodeMiu(proxy Proxy) (string, error) {
+	server := GetString(proxy, "server")
+	port := GetInt(proxy, "port")
+	psk := GetString(proxy, "psk")
+	if server == "" || port == 0 || psk == "" {
+		return "", fmt.Errorf("miu: missing server, port or psk")
+	}
+
+	params := url.Values{}
+	if GetBool(proxy, "skip-cert-verify") {
+		params.Set("insecure", "1")
+	}
+	sni := GetString(proxy, "sni")
+	if sni == "" {
+		sni = GetString(proxy, "servername")
+	}
+	if sni != "" {
+		params.Set("sni", sni)
+	}
+	if fp := GetString(proxy, "client-fingerprint"); fp != "" {
+		params.Set("fp", fp)
+	}
+	if realityOpts := GetMap(proxy, "reality-opts"); realityOpts != nil {
+		params.Set("security", "reality")
+		if pubKey := GetString(realityOpts, "public-key"); pubKey != "" {
+			params.Set("pbk", pubKey)
+		}
+		if shortID := GetString(realityOpts, "short-id"); shortID != "" {
+			params.Set("sid", shortID)
+		}
+	}
+	if alpn := GetStringSlice(proxy, "alpn"); len(alpn) > 0 {
+		params.Set("alpn", strings.Join(alpn, ","))
+	}
+	if udp, ok := proxy["udp"].(bool); ok {
+		if udp {
+			params.Set("udp", "1")
+		} else {
+			params.Set("udp", "0")
+		}
+	}
+	if val := GetString(proxy, "idle-session-timeout"); val != "" {
+		params.Set("idleSessionTimeout", val)
+	}
+	if val := proxy["min-idle-session"]; val != nil {
+		params.Set("minIdleSession", fmt.Sprintf("%v", val))
+	}
+
+	uri := fmt.Sprintf("miu://%s@%s:%d", url.PathEscape(psk), server, port)
+	if len(params) > 0 {
+		uri += "/?" + params.Encode()
+	}
+	return uri + "#" + url.PathEscape(GetString(proxy, "name")), nil
 }
 
 func (p *URIProducer) encodeNaive(proxy Proxy) (string, error) {
