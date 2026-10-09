@@ -44,6 +44,9 @@ GOOS=windows GOARCH=amd64 go build -o mmwx-speedtester.exe .
 <details>
 <summary>更新日志</summary>
 
+### v0.2.0 (2026-10-09)
+- 🌈 测速端支持 Miu 第二版:节点的线上格式换成了第二版(通道池 + 原样转发),与第一版不通 —— 只认第二版的内核(版本标记 miu2-、发布 tag mihomo-miu-v2-*),本地缓存着第一版内核的会自动换掉;内核源码改用 MiuProtocol/mihomo(上游 mihomo + Miu 出站),构建脚本不再需要改 meowC 的源码
+
 ### v0.1.9 (2026-10-08)
 - 🛠️ fix: 路由器上内核下载地址连不上(Get ...: EOF)—— 后几次重试改走 HTTP/1.1,仍不行则换系统的 curl / wget(带续传)下载;每次连接失败打印原因
 
