@@ -53,15 +53,34 @@ func TestMihomoSupportsMiu(t *testing.T) {
 	}
 	official := fake("official", "Mihomo Meta v1.19.30 linux amd64 with go1.26")
 	miuV1 := fake("miu-v1", "Mihomo Meta miu-214dbe5 linux amd64 with go1.26")
-	miu := fake("miu", "Mihomo Meta miu2-4309534 linux amd64 with go1.27")
+	miuRev1 := fake("miu-rev1", "Mihomo Meta miu2-4309534 linux amd64 with go1.27")
+	miu := fake("miu", "Mihomo Meta miu2-r2-6d87887 linux amd64 with go1.26.2")
+	miuNext := fake("miu-next", "Mihomo Meta miu2-r12-abcdef0 linux amd64 with go1.26.2")
 	if mihomoSupportsMiu(official) {
 		t.Error("官方内核不该被认成带 Miu")
 	}
 	if mihomoSupportsMiu(miuV1) {
 		t.Error("第一版 Miu 的内核不该被认成可用:它与第二版节点不通,要换掉")
 	}
+	if mihomoSupportsMiu(miuRev1) {
+		t.Error("修订 1 的内核(AnyTLS 不支持 REALITY)不该被认成够用:要换成新包")
+	}
 	if !mihomoSupportsMiu(miu) {
 		t.Error("带 Miu 的内核没认出来")
+	}
+	if !mihomoSupportsMiu(miuNext) {
+		t.Error("修订号更高的内核应当可用")
+	}
+	for out, want := range map[string]int{
+		"Mihomo Meta v1.19.30 linux amd64":          0,
+		"Mihomo Meta miu-214dbe5 linux amd64":       0,
+		"Mihomo Meta miu2-4309534 linux amd64":      1,
+		"Mihomo Meta miu2-r2-6d87887 linux amd64":   2,
+		"Mihomo Meta MIU2-R3-0000000 windows amd64": 3,
+	} {
+		if got := miuCoreRev(out); got != want {
+			t.Errorf("miuCoreRev(%q) = %d, want %d", out, got, want)
+		}
 	}
 	// 版本号里解析不出 X.Y.Z 时 snell 检查保守放行,带 Miu 的包不能被它挡掉
 	if !mihomoSupportsSnell(miu) {

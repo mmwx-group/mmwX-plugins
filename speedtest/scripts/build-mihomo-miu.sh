@@ -14,8 +14,11 @@ OUT="$(mkdir -p "${2:-./build/mihomo-miu}" && cd "${2:-./build/mihomo-miu}" && p
 [ -f "$SRC/go.mod" ] || { echo "[ERROR] 找不到 $SRC/go.mod"; exit 1; }
 [ -f "$SRC/adapter/outbound/miu.go" ] || { echo "[ERROR] $SRC 里没有 Miu 出站(adapter/outbound/miu.go),不是带 Miu 的 mihomo"; exit 1; }
 COMMIT=$(git -C "$SRC" rev-parse --short HEAD)
-# 版本号必须以 miu2- 开头:测速端靠 `mihomo -v` 的输出认这份内核,并据此把第一版(miu-<提交>)的换掉
-VERSION="miu2-${COMMIT}"
+# 版本号必须以 miu2- 开头:测速端靠 `mihomo -v` 的输出认这份内核,并据此把第一版(miu-<提交>)的换掉。
+# r<修订> 是内核能力的修订号,与 mihomo.go 的 miuCoreMinRev 对应:给内核补了测速端要用到的新能力时两边一起加一
+# (测速端发现本地内核修订不够就会换新包)。2 = AnyTLS 支持 REALITY。
+REV=2
+VERSION="miu2-r${REV}-${COMMIT}"
 
 cd "$SRC"
 for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do

@@ -29,7 +29,8 @@ func TestMiuCoreIsVerifiedBeforeReplacing(t *testing.T) {
 		t.Skip("用 shell 脚本冒充内核")
 	}
 	broken := []byte("#!/bin/sh\nkill -SEGV $$\n")
-	good := []byte("#!/bin/sh\necho 'Mihomo Meta miu2-abc1234 linux amd64'\n")
+	oldRev := []byte("#!/bin/sh\necho 'Mihomo Meta miu2-abc1234 linux amd64'\n")
+	good := []byte("#!/bin/sh\necho 'Mihomo Meta miu2-r2-abc1234 linux amd64'\n")
 	payload := broken
 	downloads := 0
 	var srv *httptest.Server
@@ -78,7 +79,19 @@ func TestMiuCoreIsVerifiedBeforeReplacing(t *testing.T) {
 	if err := downloadMiuMihomo(context.Background(), local); err == nil || downloads != 1 {
 		t.Fatalf("同一个包不该再下一遍: err=%v downloads=%d", err, downloads)
 	}
-	// 3. 发了新包(地址变了)且能跑:替换,清掉拒绝记录
+	// 3. 能跑但修订不够的包(最新的还是旧内核):同样拒绝并记下,原内核保留
+	payload = oldRev
+	miuReleasesURL = srv.URL + "/releases?v=3"
+	if err := downloadMiuMihomo(context.Background(), local); err == nil || !strings.Contains(err.Error(), "修订") {
+		t.Fatalf("修订不够的包应被拒绝并说明原因: %v", err)
+	}
+	if got, _ := os.ReadFile(local); !bytes.Equal(got, official) {
+		t.Fatal("原有内核被动了")
+	}
+	if b, _ := os.ReadFile(miuRejectedFile(local)); !strings.Contains(string(b), "/dl/3/") {
+		t.Fatalf("没记下修订不够的包: %q", b)
+	}
+	// 4. 发了新包(地址变了)且能跑、修订够:替换,清掉拒绝记录
 	payload = good
 	miuReleasesURL = srv.URL + "/releases?v=2"
 	if err := downloadMiuMihomo(context.Background(), local); err != nil {

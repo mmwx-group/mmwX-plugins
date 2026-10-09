@@ -83,14 +83,36 @@ const (
 	miuCoreRepo      = "mmwx-group/mmwX-plugins"
 	miuCoreTagPrefix = "mihomo-miu-v2-"
 	miuCoreMarker    = "miu2-"
+	// miuCoreMinRev 要求的内核修订号。我们的内核除了 Miu 还会补官方 mihomo 没有的能力,每补一项修订号加一,
+	// 版本号写成 miu2-r<修订>-<提交>(没有 r 段的是修订 1)。本地缓存的内核修订不够就去下新包;
+	// 下不到时照旧先用着旧的(只是新补的那项测不了)。
+	//   2 = AnyTLS 支持 REALITY(reality-opts;官方 mihomo 不支持这个组合)
+	miuCoreMinRev = 2
 )
 
-// mihomoSupportsMiu 看 `<bin> -v` 的输出里有没有第二版 Miu 的标记(我们的构建把版本号写成 miu2-<提交>)。
+var miuCoreRevRe = regexp.MustCompile(`miu2-r(\d+)-`)
+
+// miuCoreRev 从 `-v` 的输出里取内核修订号:不是带 Miu 第二版的内核返回 0,没有 r 段的返回 1。
+func miuCoreRev(versionOutput string) int {
+	out := strings.ToLower(versionOutput)
+	if !strings.Contains(out, miuCoreMarker) {
+		return 0
+	}
+	if m := miuCoreRevRe.FindStringSubmatch(out); m != nil {
+		if rev, err := strconv.Atoi(m[1]); err == nil {
+			return rev
+		}
+	}
+	return 1
+}
+
+// mihomoSupportsMiu 看 `<bin> -v` 的输出:是带第二版 Miu 的内核(我们的构建把版本号写成 miu2-…),
+// 并且修订号不低于 miuCoreMinRev。
 func mihomoSupportsMiu(bin string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	out, _ := exec.CommandContext(ctx, bin, "-v").CombinedOutput()
-	return strings.Contains(strings.ToLower(string(out)), miuCoreMarker)
+	return miuCoreRev(string(out)) >= miuCoreMinRev
 }
 
 // mihomoRuns 真的执行一次 `<bin> -v`:正常退出且有输出才算能用。
@@ -337,7 +359,7 @@ func downloadMiuMihomo(ctx context.Context, dst string) error {
 		return fmt.Errorf("没有匹配 %s/%s 的 mihomo-miu 包", runtime.GOOS, runtime.GOARCH)
 	}
 	if prev, _ := os.ReadFile(miuRejectedFile(dst)); strings.TrimSpace(string(prev)) == assetURL {
-		return fmt.Errorf("%s 上次下到后在本机跑不起来,等发新包再试", assetName)
+		return fmt.Errorf("%s 上次下到后不能用(跑不起来或修订不够),等发新包再试", assetName)
 	}
 	// 先下到旁边,真的跑一次确认是带 Miu 的内核再替换:直接覆盖的话,包在本机跑不起来
 	// (见 mihomoRuns)就连原来能用的内核也一起没了。
@@ -346,9 +368,14 @@ func downloadMiuMihomo(ctx context.Context, dst string) error {
 	if err := downloadMihomoAsset(ctx, assetURL, assetName, cand); err != nil {
 		return err
 	}
-	if !mihomoRuns(cand) || !mihomoSupportsMiu(cand) {
+	if !mihomoRuns(cand) {
 		_ = os.WriteFile(miuRejectedFile(dst), []byte(assetURL+"\n"), 0644)
 		return fmt.Errorf("%s 在本机无法执行(下载完整,但运行 -v 失败),保留原有内核", assetName)
+	}
+	// 能跑但不够新(最新的包还是旧修订:新内核包还没发出来),同样记下,等发新包再试。
+	if !mihomoSupportsMiu(cand) {
+		_ = os.WriteFile(miuRejectedFile(dst), []byte(assetURL+"\n"), 0644)
+		return fmt.Errorf("%s 不是带 Miu 的内核或修订号低于 r%d,保留原有内核", assetName, miuCoreMinRev)
 	}
 	_ = os.Remove(miuRejectedFile(dst))
 	return os.Rename(cand, dst)
