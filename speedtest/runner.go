@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -207,19 +208,31 @@ func startMihomo(bin, workdir string, cfg []byte) (func(), error) {
 		return nil, err
 	}
 	cmd := exec.Command(bin, "-d", workdir, "-f", cfgPath)
+	// 捕获内核输出:内核起不来(配置里有它不认的协议 / 参数、端口被占、被系统杀掉)时,
+	// 以前只回「启动超时(15s)」,真正的原因全被吞掉 —— 主控和这边的日志里都看不到。
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	// cmd.Wait 只能调一次:统一由这个 goroutine 调,退出信号经 waitCh 分给下面的秒退检测与 stop()。
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
 	addr := fmt.Sprintf("127.0.0.1:%d", mixedPort)
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case werr := <-waitCh:
+			// 进程已退出 → 立刻失败并带上内核自己的报错,不再干等 15s
+			return nil, fmt.Errorf("mihomo 启动失败(%v): %s", werr, coreErrTail(out.String()))
+		default:
+		}
 		if c, derr := (&net.Dialer{Timeout: 500 * time.Millisecond}).Dial("tcp", addr); derr == nil {
 			c.Close()
 			var once sync.Once
 			return func() {
 				once.Do(func() {
-					done := make(chan error, 1)
-					go func() { done <- cmd.Wait() }()
 					// Windows 不支持向子进程发 SIGTERM,直接 Kill;其它平台先优雅 SIGTERM 再兜底 Kill。
 					if runtime.GOOS == "windows" {
 						_ = cmd.Process.Kill()
@@ -227,10 +240,10 @@ func startMihomo(bin, workdir string, cfg []byte) (func(), error) {
 						_ = cmd.Process.Signal(syscall.SIGTERM)
 					}
 					select {
-					case <-done:
+					case <-waitCh:
 					case <-time.After(3 * time.Second):
 						_ = cmd.Process.Kill()
-						<-done
+						<-waitCh
 					}
 				})
 			}, nil
@@ -238,8 +251,23 @@ func startMihomo(bin, workdir string, cfg []byte) (func(), error) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
-	return nil, fmt.Errorf("mihomo 启动超时(端口 %d 15s 内未就绪)", mixedPort)
+	<-waitCh
+	return nil, fmt.Errorf("mihomo 启动超时(端口 %d 15s 内未就绪): %s", mixedPort, coreErrTail(out.String()))
+}
+
+// coreErrTail 从内核输出里挑最有用的一行(最后一条 error / fatal;没有就取末行)。
+func coreErrTail(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if strings.Contains(l, "level=fatal") || strings.Contains(l, "level=error") {
+			return l
+		}
+	}
+	if l := strings.TrimSpace(lines[len(lines)-1]); l != "" {
+		return l
+	}
+	return "(内核没有任何输出)"
 }
 
 // proxyClient 经 mihomo mixed-port 走代理的 HTTP 客户端。

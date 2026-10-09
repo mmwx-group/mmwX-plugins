@@ -302,6 +302,10 @@ func runJob(job wsMsg, send func(wsMsg) error) {
 		log.Printf("[speedtester] 回传结果失败: %v", err)
 		return
 	}
+	if out.Error != "" {
+		// 失败原因也打在本机日志里:主控界面上只显示「失败」两个字
+		log.Printf("[speedtester] job=%s 失败原因: %s", job.JobID, out.Error)
+	}
 	log.Printf("[speedtester] job=%s 完成 status=%s down=%.1fMbps", job.JobID, out.Status, out.DownMbps)
 }
 
