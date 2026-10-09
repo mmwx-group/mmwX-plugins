@@ -93,6 +93,22 @@ func mihomoSupportsMiu(bin string) bool {
 	return strings.Contains(strings.ToLower(string(out)), miuCoreMarker)
 }
 
+// mihomoRuns 真的执行一次 `<bin> -v`:正常退出且有输出才算能用。
+//
+// 只看文件在不在是不够的:Go 1.27.0 编的那批 mihomo-miu-v2 包在部分机器上一加载就段错误
+// (用户的路由器,内核 6.18-rc6),`-v` 没有任何输出。而版本号解析不出来时 mihomoSupportsSnell
+// 会保守放行 —— 于是崩掉的内核被判成「就绪」,之后每个测速任务都失败。
+func mihomoRuns(bin string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "-v").CombinedOutput()
+	return err == nil && len(strings.TrimSpace(string(out))) > 0
+}
+
+// miuRejectedFile 记下「下到了但在本机跑不起来」的那个包的下载地址。同一个包不再反复下
+// (二十多 MB,每 10 分钟一次);发了新包地址变了才会再试。
+func miuRejectedFile(local string) string { return local + ".miu-rejected" }
+
 // mihomoBinName 平台相关的 mihomo 可执行文件名(Windows 带 .exe)。
 func mihomoBinName() string {
 	if runtime.GOOS == "windows" {
@@ -155,13 +171,18 @@ func EnsureMihomo(ctx context.Context) (string, error) {
 		return p, nil
 	}
 	local := filepath.Join(mihomoCacheDir, mihomoBinName())
+	// 本地缓存的内核跑不起来(下坏了,或换了机器 / 系统后不兼容)就当它不存在,后面重新准备。
+	if fileExists(local) && !mihomoRuns(local) {
+		log.Printf("[warn] %s 在本机无法执行,弃用并重新准备内核", local)
+		_ = os.Remove(local)
+	}
 	localOK := fileExists(local) && mihomoSupportsSnell(local)
 	if localOK && mihomoSupportsMiu(local) {
 		cachedPath = local
 		return local, nil
 	}
 	pathBin, perr := exec.LookPath("mihomo")
-	pathOK := perr == nil && mihomoSupportsSnell(pathBin)
+	pathOK := perr == nil && mihomoRuns(pathBin) && mihomoSupportsSnell(pathBin)
 	if pathOK && mihomoSupportsMiu(pathBin) {
 		cachedPath = pathBin
 		return pathBin, nil
@@ -170,7 +191,7 @@ func EnsureMihomo(ctx context.Context) (string, error) {
 		cachedPath = local
 		return local, nil
 	} else {
-		log.Printf("[warn] 带 Miu 的 mihomo 下载失败,先用官方内核(Miu 节点暂时测不了),后台每 10 分钟重试: %v", err)
+		log.Printf("[warn] 带 Miu 的 mihomo 没能换上,先用官方内核(Miu 节点暂时测不了),后台每 10 分钟重试: %v", err)
 		miuRetryOnce.Do(func() { go retryMiuDownload(local) })
 	}
 	if localOK {
@@ -184,6 +205,10 @@ func EnsureMihomo(ctx context.Context) (string, error) {
 	// 自动下载最新(支持 snell)。若 data/bin 里是旧版会被覆盖。
 	if err := downloadMihomo(ctx, local); err != nil {
 		return "", fmt.Errorf("mihomo 不可用且自动下载失败: %w", err)
+	}
+	if !mihomoRuns(local) {
+		_ = os.Remove(local)
+		return "", fmt.Errorf("下载到的 mihomo 在本机无法执行(%s/%s),请手动放一个能用的内核到 %s 或用 MIHOMO_BIN 指定", runtime.GOOS, runtime.GOARCH, local)
 	}
 	cachedPath = local
 	return local, nil
@@ -288,8 +313,11 @@ func pickMiuAsset(rels []ghRelease, goos, goarch string) (url, name string) {
 }
 
 // downloadMiuMihomo 下载带 Miu 的 mihomo 到 dst。各平台都是 .gz 单二进制。
+// miuReleasesURL 带 Miu 的内核包所在的 release 列表(变量是为了测试里能指到本地)。
+var miuReleasesURL = "https://api.github.com/repos/" + miuCoreRepo + "/releases?per_page=30"
+
 func downloadMiuMihomo(ctx context.Context, dst string) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/"+miuCoreRepo+"/releases?per_page=30", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, miuReleasesURL, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "miaomiaowux-speedtest")
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
@@ -308,7 +336,22 @@ func downloadMiuMihomo(ctx context.Context, dst string) error {
 	if assetURL == "" {
 		return fmt.Errorf("没有匹配 %s/%s 的 mihomo-miu 包", runtime.GOOS, runtime.GOARCH)
 	}
-	return downloadMihomoAsset(ctx, assetURL, assetName, dst)
+	if prev, _ := os.ReadFile(miuRejectedFile(dst)); strings.TrimSpace(string(prev)) == assetURL {
+		return fmt.Errorf("%s 上次下到后在本机跑不起来,等发新包再试", assetName)
+	}
+	// 先下到旁边,真的跑一次确认是带 Miu 的内核再替换:直接覆盖的话,包在本机跑不起来
+	// (见 mihomoRuns)就连原来能用的内核也一起没了。
+	cand := filepath.Join(filepath.Dir(dst), "miu-new-"+filepath.Base(dst))
+	defer os.Remove(cand)
+	if err := downloadMihomoAsset(ctx, assetURL, assetName, cand); err != nil {
+		return err
+	}
+	if !mihomoRuns(cand) || !mihomoSupportsMiu(cand) {
+		_ = os.WriteFile(miuRejectedFile(dst), []byte(assetURL+"\n"), 0644)
+		return fmt.Errorf("%s 在本机无法执行(下载完整,但运行 -v 失败),保留原有内核", assetName)
+	}
+	_ = os.Remove(miuRejectedFile(dst))
+	return os.Rename(cand, dst)
 }
 
 // downloadMihomoAsset 下载一个 release 资源并解到 dst:.zip 取其中的 .exe,其余按 .gz 单二进制。
