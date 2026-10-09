@@ -22,7 +22,9 @@ for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 d
   goos=${target%/*}; goarch=${target#*/}
   name="mihomo-miu-${goos}-${goarch}"
   echo "[build] $name ($VERSION)"
-  CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build -trimpath -tags with_gvisor \
+  # 固定用 Go 1.26 编(上游 mihomo 的 CI 也是 1.26):Go 1.27.0 编出来的包在部分机器上
+  # (内核 6.18-rc 的 x86_64 路由器)一加载就段错误,-v 都跑不出来,换 1.26.2 重编后正常。
+  CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch GOTOOLCHAIN="${MIU_GO_TOOLCHAIN:-go1.26.2}" go build -trimpath -tags with_gvisor \
     -ldflags "-X github.com/metacubex/mihomo/constant.Version=${VERSION} -w -s -buildid=" \
     -o "$OUT/$name" .
   gzip -9 -f "$OUT/$name"
