@@ -1511,6 +1511,12 @@ func (p *URIProducer) encodeMiu(proxy Proxy) (string, error) {
 	if fp := GetString(proxy, "client-fingerprint"); fp != "" {
 		params.Set("fp", fp)
 	}
+	// 服务端证书的 SHA-256(tls-fingerprint → pcs,与 vless:// / trojan:// 同一个参数名)。
+	// 漏掉它的话,自签证书的节点导出来只剩 insecure=1:按链接导入的客户端既不校验证书、
+	// 也不比对指纹,等于完全不验 —— 而节点配置里明明带着指纹(「节点配置与复制的链接不一致」)。
+	if pcs := GetString(proxy, "tls-fingerprint"); pcs != "" {
+		params.Set("pcs", pcs)
+	}
 	if realityOpts := GetMap(proxy, "reality-opts"); realityOpts != nil {
 		params.Set("security", "reality")
 		if pubKey := GetString(realityOpts, "public-key"); pubKey != "" {

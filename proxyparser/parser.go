@@ -1354,6 +1354,10 @@ func parseMiuURL(uri string) (map[string]any, error) {
 	if fp := queryParams["fp"]; fp != "" {
 		node["client-fingerprint"] = fp
 	}
+	// 服务端证书指纹(pcs 等写法 → tls-fingerprint),与导出一侧对应。
+	if pin := certFingerprint(queryParams); pin != "" {
+		node["tls-fingerprint"] = pin
+	}
 	if v := queryParams["idleSessionTimeout"]; v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			node["idle-session-timeout"] = i

@@ -80,6 +80,13 @@ func TestMiuURIRoundTrip(t *testing.T) {
 			"psk": "raw-psk-at-least-16-bytes", "udp": false, "sni": "a.example.com",
 			"skip-cert-verify": true, "alpn": []string{"h2", "http/1.1"},
 		},
+		{
+			// 主控给 TLS 节点补的服务端证书指纹:自签证书靠它防中间人,导出时不能丢
+			"name": "tls-pinned", "type": "miu", "server": "hk.example.com", "port": 8443,
+			"psk": "raw-psk-at-least-16-bytes", "udp": true, "sni": "hk.example.com",
+			"skip-cert-verify": true, "client-fingerprint": "chrome",
+			"tls-fingerprint": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+		},
 	} {
 		uri, err := substore.NewURIProducer().ProduceOne(proxy)
 		if err != nil {
@@ -89,7 +96,7 @@ func TestMiuURIRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v: 解析 %q 失败: %v", proxy["name"], uri, err)
 		}
-		for _, k := range []string{"name", "type", "server", "port", "psk", "udp", "sni"} {
+		for _, k := range []string{"name", "type", "server", "port", "psk", "udp", "sni", "tls-fingerprint", "client-fingerprint"} {
 			if !reflect.DeepEqual(back[k], proxy[k]) {
 				t.Errorf("%v: %s = %#v, want %#v (uri %s)", proxy["name"], k, back[k], proxy[k], uri)
 			}
