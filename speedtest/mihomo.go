@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -103,7 +104,35 @@ func mihomoBinName() string {
 var (
 	mihomoMu   sync.Mutex // 串行化定位/下载,避免并发重复下载
 	cachedPath string
+
+	// 内核还没就绪、EnsureMihomo 正在定位 / 下载它。测速任务据此立刻回「内核还在准备」,
+	// 而不是排在同一把锁后面干等 —— 那样主控只会显示「超时」,看不出原因。
+	mihomoPreparing atomic.Bool
+	dlName          atomic.Value // string:正在下的资源名,没在下时为 ""
+	dlGot, dlTotal  atomic.Int64 // 已下 / 总字节(总数未知时为 0)
 )
+
+// mihomoBusyReason 内核正在准备时返回给主控看的原因;已就绪或没在准备时返回 ""。
+func mihomoBusyReason() string {
+	if !mihomoPreparing.Load() {
+		return ""
+	}
+	name, _ := dlName.Load().(string)
+	if name == "" {
+		return "mihomo 内核还在准备,请稍后再测"
+	}
+	return "mihomo 内核还在下载(" + dlProgress() + "),下完再测"
+}
+
+// dlProgress 形如 "5.2 / 21.6 MB,24%";总大小未知时只有已下的部分。
+func dlProgress() string {
+	got, total := dlGot.Load(), dlTotal.Load()
+	const mb = 1 << 20
+	if total <= 0 {
+		return fmt.Sprintf("已下 %.1f MB", float64(got)/mb)
+	}
+	return fmt.Sprintf("%.1f / %.1f MB,%d%%", float64(got)/mb, float64(total)/mb, got*100/total)
+}
 
 // EnsureMihomo 返回可用的 mihomo 二进制路径;按序尝试:env MIHOMO_BIN → data/bin/mihomo →
 // $PATH → 自动下载到 data/bin/mihomo。
@@ -118,6 +147,8 @@ func EnsureMihomo(ctx context.Context) (string, error) {
 	if cachedPath != "" && fileExists(cachedPath) {
 		return cachedPath, nil
 	}
+	mihomoPreparing.Store(true)
+	defer mihomoPreparing.Store(false)
 	// 每个候选都要求版本支持 snell(>= minMihomoVersion),否则跳过、最终重新下载最新。
 	if p := os.Getenv("MIHOMO_BIN"); p != "" && fileExists(p) && mihomoSupportsSnell(p) {
 		cachedPath = p
@@ -288,6 +319,24 @@ func downloadMihomoAsset(ctx context.Context, assetURL, assetName, dst string) e
 	log.Printf("[speedtester] 下载内核 %s ...", assetName)
 	dl := dst + ".dl"
 	defer os.Remove(dl)
+	dlGot.Store(0)
+	dlTotal.Store(0)
+	dlName.Store(assetName)
+	defer dlName.Store("")
+	stopProgress := make(chan struct{})
+	defer close(stopProgress)
+	go func() { // 每 15 秒报一次进度:国内线路下这二十多 MB 常要几分钟,没有输出看着像卡死
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopProgress:
+				return
+			case <-t.C:
+				log.Printf("[speedtester] 内核下载中: %s", dlProgress())
+			}
+		}
+	}()
 	if err := fetchWithResume(ctx, assetURL, dl); err != nil {
 		// 自带的下载器连不上时换系统的 curl / wget 再试:有的路由器上(透明代理、中间盒)
 		// Go 的 HTTPS 连接建不起来(Get ...: EOF),而同一台机器上 curl 能下。
@@ -419,7 +468,15 @@ func fetchWithResume(ctx context.Context, url, path string) error {
 			resp.Body.Close()
 			return err
 		}
-		_, err = io.Copy(f, resp.Body)
+		dlGot.Store(have)
+		if resp.StatusCode == http.StatusOK {
+			dlGot.Store(0)
+			have = 0
+		}
+		if resp.ContentLength > 0 {
+			dlTotal.Store(have + resp.ContentLength)
+		}
+		_, err = io.Copy(f, io.TeeReader(resp.Body, countingWriter{&dlGot}))
 		resp.Body.Close()
 		f.Close()
 		if err == nil {
@@ -431,6 +488,14 @@ func fetchWithResume(ctx context.Context, url, path string) error {
 		}
 	}
 	return lastErr
+}
+
+// countingWriter 把写入的字节数累加到 n,给下载进度用。
+type countingWriter struct{ n *atomic.Int64 }
+
+func (c countingWriter) Write(p []byte) (int, error) {
+	c.n.Add(int64(len(p)))
+	return len(p), nil
 }
 
 // fetchWithSystemTool 用系统的 curl(没有就 wget)把 url 下到 path,带续传与重试。

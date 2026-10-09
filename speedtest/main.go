@@ -272,6 +272,12 @@ func connectAndServe(wsURL, name string, onConnected func()) error {
 
 func runJob(job wsMsg, send func(wsMsg) error) {
 	log.Printf("[speedtester] 收到测速任务 job=%s", job.JobID)
+	// 内核还在下载 / 准备时不排队等它:主控那边只会等到超时,用户看不出原因。直接把原因回过去。
+	if reason := mihomoBusyReason(); reason != "" {
+		log.Printf("[speedtester] job=%s 未执行: %s", job.JobID, reason)
+		_ = send(wsMsg{Type: "result", JobID: job.JobID, Status: "failed", Error: reason})
+		return
+	}
 	bin, err := EnsureMihomo(context.Background())
 	if err != nil {
 		_ = send(wsMsg{Type: "result", JobID: job.JobID, Status: "failed", Error: "mihomo 不可用: " + err.Error()})
