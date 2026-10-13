@@ -62,11 +62,11 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 		shouldSkip := false
 		if !opts.IncludeUnsupportedProxy {
 			switch {
-			// 不支持的协议类型 / 不支持的 SS cipher / snell v4+
+			// 不支持的协议类型 / 不支持的 SS cipher / snell v6 以上(上游 485869aa 起 Stash 支持到 v6)
 			// (JS stash.js 第 20-59 行, 合并为一个判断分支)
 			case !p.isSupportedType(proxyType),
 				proxyType == "ss" && !supportedSSCiphers[GetString(proxy, "cipher")],
-				proxyType == "snell" && GetInt(proxy, "version") >= 4:
+				proxyType == "snell" && GetInt(proxy, "version") > 6:
 				shouldSkip = true
 				logger.Info("[Stash] 跳过不支持的节点(类型/cipher/snell版本)",
 					"name", GetString(proxy, "name"), "type", proxyType)

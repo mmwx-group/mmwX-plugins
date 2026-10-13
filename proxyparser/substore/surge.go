@@ -195,7 +195,7 @@ func (p *SurgeProducer) shadowsocks(proxy Proxy, _ bool) (string, error) {
 	result.AppendIfPresent(`,password="%s"`, "password")
 
 	p.appendIPVersion(result, proxy)
-	p.appendCommonOptions(result, proxy)
+	p.appendCommonOptionsUDP(result, proxy, true)
 
 	// obfs
 	if IsPresent(proxy, "plugin") {
@@ -439,7 +439,6 @@ func (p *SurgeProducer) tuic(proxy Proxy) (string, error) {
 
 	// Common options except tfo (we handle it separately below)
 	result.AppendIfPresent(`,no-error-alert=%v`, "no-error-alert")
-	result.AppendIfPresent(`,udp-relay=%v`, "udp")
 	result.AppendIfPresent(`,test-url=%s`, "test-url")
 	result.AppendIfPresent(`,test-timeout=%d`, "test-timeout")
 	result.AppendIfPresent(`,test-udp=%s`, "test-udp")
@@ -728,10 +727,19 @@ func (p *SurgeProducer) appendIPVersion(result *Result, proxy Proxy) {
 	}
 }
 
-func (p *SurgeProducer) appendCommonOptions(result *Result, _ Proxy) {
+// appendCommonOptions 写各协议共用的参数,不含 udp-relay。
+// udp-relay 只对 Shadowsocks / SOCKS5 / HTTP2 CONNECT / External 有意义(上游 4a1e069c),
+// 其它协议(trojan / vmess / snell / anytls……)Surge 自己决定走不走 UDP,写了反而是多余参数。
+func (p *SurgeProducer) appendCommonOptions(result *Result, proxy Proxy) {
+	p.appendCommonOptionsUDP(result, proxy, false)
+}
+
+func (p *SurgeProducer) appendCommonOptionsUDP(result *Result, _ Proxy, udpRelay bool) {
 	result.AppendIfPresent(`,no-error-alert=%v`, "no-error-alert")
 	result.AppendIfPresent(`,tfo=%v`, "tfo")
-	result.AppendIfPresent(`,udp-relay=%v`, "udp")
+	if udpRelay {
+		result.AppendIfPresent(`,udp-relay=%v`, "udp")
+	}
 	result.AppendIfPresent(`,test-url=%s`, "test-url")
 	result.AppendIfPresent(`,test-timeout=%d`, "test-timeout")
 	result.AppendIfPresent(`,test-udp=%s`, "test-udp")

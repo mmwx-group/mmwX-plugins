@@ -666,7 +666,9 @@ func (p *ShadowrocketTemplateProducer) transformProxies(proxies []Proxy, opts *P
 
 		// Filter unsupported types
 		if !opts.IncludeUnsupportedProxy {
-			if proxyType == "snell" && GetInt(proxy, "version") >= 4 {
+			// 与非模板版同一套规则:Shadowrocket 支持 Snell v1–v6。这里以前把 v4 以上整个丢掉,
+			// 绑了模板的订阅里 Snell v4 / v5 / v6 节点全部消失。
+			if !srSupportsSnellVersion(proxy) || srSnellShadowTLSObfsConflict(proxy) {
 				continue
 			}
 			if proxyType == "mieru" {
@@ -774,10 +776,7 @@ func (p *ShadowrocketTemplateProducer) transformProxies(proxies []Proxy, opts *P
 
 		// Snell transformations
 		if proxyType == "snell" {
-			version := GetInt(transformed, "version")
-			if version < 3 {
-				delete(transformed, "udp")
-			}
+			srTransformSnell(transformed)
 		}
 
 		// VLESS transformations

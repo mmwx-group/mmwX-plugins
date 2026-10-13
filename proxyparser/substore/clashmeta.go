@@ -107,6 +107,10 @@ func (p *ClashMetaProducer) Produce(proxies []Proxy, outputType string, opts *Pr
 			if proxyType == "juicity" || proxyType == "naive" {
 				continue
 			}
+			// Surge 的 MASQUE 写法 mihomo 不认(上游 bcfdd10e)
+			if proxyType == "masque-surge" {
+				continue
+			}
 
 			// Check SS cipher
 			if proxyType == "ss" {

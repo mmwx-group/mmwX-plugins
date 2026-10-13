@@ -3,6 +3,8 @@ package substore
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/logger"
 )
 
 // srVmessSecurityCommon 对齐 JS vmess-security.js VMESS_SECURITY_COMMON_VALUES
@@ -42,6 +44,50 @@ func srNormalizeVmessSecurity(security string) string {
 }
 
 // srSupportsV2rayPluginMode 对齐 JS supportsShadowsocksV2rayPluginMode:
+// srSupportsSnellVersion 对齐上游 shadowrocket.js:Shadowrocket 支持 Snell v1–v6,其余版本过滤。
+// 非 snell 节点一律放行。
+func srSupportsSnellVersion(proxy Proxy) bool {
+	if GetString(proxy, "type") != "snell" {
+		return true
+	}
+	version := GetInt(proxy, "version")
+	return version >= 1 && version <= 6
+}
+
+// srSnellShadowTLSObfsConflict 对齐上游 hasShadowrocketSnellShadowTlsObfsConflict:
+// Snell 走 shadow-tls 插件时,Shadowrocket 把它写在 obfs-opts 里,原有的 obfs 就没地方放了。
+func srSnellShadowTLSObfsConflict(proxy Proxy) bool {
+	if GetString(proxy, "type") != "snell" || GetString(proxy, "plugin") != "shadow-tls" {
+		return false
+	}
+	obfs := GetMap(proxy, "obfs-opts")
+	return obfs != nil && (IsPresent(obfs, "mode") || IsPresent(obfs, "host") || IsPresent(obfs, "path"))
+}
+
+// srTransformSnell 对齐上游 shadowrocket.js 的 snell 分支:v3 以下没有 UDP;
+// shadow-tls 插件改写成 Shadowrocket 认的 obfs-opts { mode: shadow-tls, host, password, version[, alpn] }。
+func srTransformSnell(proxy Proxy) {
+	if GetInt(proxy, "version") < 3 {
+		delete(proxy, "udp")
+	}
+	pluginOpts := GetMap(proxy, "plugin-opts")
+	if GetString(proxy, "plugin") != "shadow-tls" || pluginOpts == nil {
+		return
+	}
+	obfs := map[string]interface{}{
+		"mode":     "shadow-tls",
+		"host":     pluginOpts["host"],
+		"password": pluginOpts["password"],
+		"version":  pluginOpts["version"],
+	}
+	if alpn, ok := pluginOpts["alpn"]; ok && alpn != nil && alpn != "" {
+		obfs["alpn"] = alpn
+	}
+	proxy["obfs-opts"] = obfs
+	delete(proxy, "plugin")
+	delete(proxy, "plugin-opts")
+}
+
 // 仅当 ss + plugin=v2ray-plugin 时校验 plugin-opts.mode 是否在受支持列表内;其它情况一律 true。
 func srSupportsV2rayPluginMode(proxy Proxy, supportedModes map[string]bool) bool {
 	if GetString(proxy, "type") != "ss" || GetString(proxy, "plugin") != "v2ray-plugin" {
@@ -113,18 +159,21 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 			if !srSupportsV2rayPluginMode(proxy, ssV2rayPluginModes) {
 				continue
 			}
-			// snell 仅支持 version 1..5
-			if proxyType == "snell" {
-				version := GetInt(proxy, "version")
-				if version < 1 || version > 5 {
-					continue
-				}
+			// snell 支持 version 1..6(上游 0f4d78d3 起放开 v6)
+			if !srSupportsSnellVersion(proxy) {
+				continue
+			}
+			// snell 的 shadow-tls 与 obfs 不能同时用(上游 387d90c1)
+			if srSnellShadowTLSObfsConflict(proxy) {
+				logger.Info("[Shadowrocket] Snell 的 shadow-tls 不能与 obfs 同时使用,已过滤", "name", GetString(proxy, "name"))
+				continue
 			}
 			// 明确不支持的类型。上游后来补了 shadowquic / zerotier(b63f6084、47ce75a4),
 			// 我们漏掉的话这两类节点会被原样输出到 Shadowrocket 配置里,客户端解析不了。
 			if proxyType == "tailscale" || proxyType == "sudoku" || proxyType == "naive" ||
 				proxyType == "openvpn" || proxyType == "gost-relay" ||
-				proxyType == "shadowquic" || proxyType == "zerotier" {
+				proxyType == "shadowquic" || proxyType == "zerotier" ||
+				proxyType == "masque-surge" || proxyType == "easytier" {
 				continue
 			}
 			// JS: network==='xhttp' 仅告警保留(VLESS XHTTP 结构复杂, Shadowrocket 可能无法完全兼容)
@@ -242,10 +291,7 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 
 		// Snell transformations
 		if proxyType == "snell" {
-			version := GetInt(transformed, "version")
-			if version < 3 {
-				delete(transformed, "udp")
-			}
+			srTransformSnell(transformed)
 		}
 
 		// VLESS transformations

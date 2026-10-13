@@ -130,17 +130,23 @@ func TestStashSSV2rayPluginModeFilter(t *testing.T) {
 	}
 }
 
-// include-unsupported-proxy 开启时绕过所有过滤(如本不支持的 ssh? 实际 ssh 支持,
-// 用 snell v4 这种确定会被过滤的节点验证放行)。
+// include-unsupported-proxy 开启时绕过所有过滤(用 snell v7 这种确定会被过滤的节点验证放行)。
+// Stash 支持到 Snell v6(上游 485869aa),v4 / v5 / v6 默认就保留。
 func TestStashIncludeUnsupportedBypassesFilter(t *testing.T) {
-	snellV4 := []Proxy{{
-		"name": "sn", "type": "snell", "server": "a.com", "port": 443, "version": 4,
-	}}
-	if produceStashCount(t, snellV4, &ProduceOptions{}) != 0 {
-		t.Fatalf("默认情况下 snell v4 应被跳过")
+	for _, version := range []int{4, 5, 6} {
+		kept := []Proxy{{"name": "sn", "type": "snell", "server": "a.com", "port": 443, "version": version}}
+		if produceStashCount(t, kept, &ProduceOptions{}) != 1 {
+			t.Fatalf("snell v%d 应保留", version)
+		}
 	}
-	if produceStashCount(t, snellV4, &ProduceOptions{IncludeUnsupportedProxy: true}) != 1 {
-		t.Fatalf("include-unsupported-proxy 开启时 snell v4 应被放行")
+	snellV7 := []Proxy{{
+		"name": "sn", "type": "snell", "server": "a.com", "port": 443, "version": 7,
+	}}
+	if produceStashCount(t, snellV7, &ProduceOptions{}) != 0 {
+		t.Fatalf("默认情况下 snell v7 应被跳过")
+	}
+	if produceStashCount(t, snellV7, &ProduceOptions{IncludeUnsupportedProxy: true}) != 1 {
+		t.Fatalf("include-unsupported-proxy 开启时 snell v7 应被放行")
 	}
 }
 

@@ -69,12 +69,19 @@ func TestShadowrocketWsEarlyData(t *testing.T) {
 	}
 }
 
-// 对齐 JS: snell 仅支持 version 1..5, 其余过滤。
+// 对齐 JS: snell 支持 version 1..6(上游 0f4d78d3 起放开 v6), 其余过滤。
 func TestShadowrocketSnellVersionFilter(t *testing.T) {
+	for _, version := range []int{4, 5, 6} {
+		if _, ok := srInternal(t, Proxy{
+			"name": "s", "type": "snell", "server": "a.com", "port": 443, "psk": "k", "version": version,
+		}); !ok {
+			t.Errorf("snell version %d 不应被过滤", version)
+		}
+	}
 	if _, ok := srInternal(t, Proxy{
-		"name": "s", "type": "snell", "server": "a.com", "port": 443, "psk": "k", "version": 6,
+		"name": "s", "type": "snell", "server": "a.com", "port": 443, "psk": "k", "version": 7,
 	}); ok {
-		t.Error("snell version 6 应被过滤")
+		t.Error("snell version 7 应被过滤")
 	}
 	if _, ok := srInternal(t, Proxy{
 		"name": "s", "type": "snell", "server": "a.com", "port": 443, "psk": "k", "version": 3,

@@ -848,11 +848,17 @@ func (p *SingboxProducer) sshParser(proxy Proxy) (map[string]interface{}, error)
 		parsed["password"] = password
 	}
 
-	if privateKey := GetString(proxy, "privateKey"); privateKey != "" {
-		parsed["private_key_path"] = privateKey
+	// 私钥可能是文件路径,也可能直接是内容(上游 04f44c2a);判断方式与 mihomo 一致,不严谨但够用
+	privateKey := GetString(proxy, "private-key")
+	if privateKey == "" {
+		privateKey = GetString(proxy, "privateKey")
 	}
-	if privateKey := GetString(proxy, "private-key"); privateKey != "" {
-		parsed["private_key_path"] = privateKey
+	if privateKey != "" {
+		if strings.Contains(privateKey, "PRIVATE KEY") {
+			parsed["private_key"] = privateKey
+		} else {
+			parsed["private_key_path"] = privateKey
+		}
 	}
 	if passphrase := GetString(proxy, "private-key-passphrase"); passphrase != "" {
 		parsed["private_key_passphrase"] = passphrase

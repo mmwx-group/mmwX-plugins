@@ -509,6 +509,10 @@ func (p *URIProducer) encodeVLESS(proxy Proxy) (string, error) {
 		security = "reality"
 		if pubKey := GetString(realityOpts, "public-key"); pubKey != "" {
 			params.Set("pbk", pubKey)
+			// mihomo 的后量子密钥交换开关,跟着公钥一起带出去(上游 5d7126e9)
+			if GetBool(realityOpts, "support-x25519mlkem768") {
+				params.Set("support-x25519mlkem768", "true")
+			}
 		}
 		if shortID := GetAnyString(realityOpts, "short-id"); shortID != "" {
 			params.Set("sid", shortID)

@@ -207,3 +207,15 @@ func TestParse_SubStoreBugFixes(t *testing.T) {
 		}
 	})
 }
+
+// VLESS 链接里的 support-x25519mlkem768 读回 reality-opts(上游 Sub-Store 5d7126e9)。
+func TestParseVlessURLRealityMLKEM(t *testing.T) {
+	node, err := parseVlessURL("vless://11111111-1111-1111-1111-111111111111@a.com:443?security=reality&pbk=PUBKEY&sid=ab&sni=www.example.com&support-x25519mlkem768=true#v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, _ := node["reality-opts"].(map[string]any)
+	if opts == nil || opts["support-x25519mlkem768"] != true {
+		t.Fatalf("reality-opts 里应有 support-x25519mlkem768: %v", node["reality-opts"])
+	}
+}

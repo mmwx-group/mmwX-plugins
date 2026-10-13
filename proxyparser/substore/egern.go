@@ -15,6 +15,19 @@ type EgernProducer struct {
 }
 
 // NewEgernProducer creates a new Egern producer
+// egernIPVersions 对齐上游 egern.js 的 ipVersions:mihomo 的 ip-version 写法 → Egern 的。
+var egernIPVersions = map[string]string{
+	"dual":        "dual_stack",
+	"ipv4":        "v4_only",
+	"ipv6":        "v6_only",
+	"v4-only":     "v4_only",
+	"v6-only":     "v6_only",
+	"ipv4-prefer": "v4_prefer",
+	"ipv6-prefer": "v6_prefer",
+	"prefer-v4":   "v4_prefer",
+	"prefer-v6":   "v6_prefer",
+}
+
 func NewEgernProducer() *EgernProducer {
 	return &EgernProducer{
 		producerType: "egern",
@@ -270,6 +283,14 @@ func (p *EgernProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 			if udpPort > 0 && udpPort <= 65535 {
 				transformed["udp_port"] = udpPort
 			}
+		}
+
+		// ip-version → Egern 的 ip_version(上游 ece585cd);不在表里的值原样带过去
+		if ipVersion := GetString(original, "ip-version"); ipVersion != "" {
+			if mapped, ok := egernIPVersions[ipVersion]; ok {
+				ipVersion = mapped
+			}
+			transformed["ip_version"] = ipVersion
 		}
 
 		// Clean up metadata fields

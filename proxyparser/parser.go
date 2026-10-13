@@ -885,6 +885,11 @@ func parseVlessURL(uri string) (map[string]any, error) {
 		realityOpts := map[string]any{}
 		if pbk := firstNonEmpty(queryParams, "pbk", "public-key"); pbk != "" {
 			realityOpts["public-key"] = pbk
+			// 上游 5d7126e9:support-x25519mlkem768 的真值写法与 Go 的 strconv.ParseBool 一致
+			switch queryParams["support-x25519mlkem768"] {
+			case "1", "t", "T", "true", "TRUE", "True":
+				realityOpts["support-x25519mlkem768"] = true
+			}
 		}
 		if sid := queryParams["sid"]; sid != "" {
 			realityOpts["short-id"] = sid

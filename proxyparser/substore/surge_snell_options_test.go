@@ -39,8 +39,9 @@ func TestSurgeSnellOutputsExplicitOptionalParameters(t *testing.T) {
 	if strings.Count(got, "tfo=false") != 1 {
 		t.Fatalf("explicit tfo must be output exactly once: %s", got)
 	}
-	if !strings.Contains(got, "udp-relay=true") {
-		t.Fatalf("explicit udp-relay=true missing: %s", got)
+	// udp-relay 只对 Shadowsocks / SOCKS5 等有意义,Snell 不再写(上游 4a1e069c)
+	if strings.Contains(got, "udp-relay=") {
+		t.Fatalf("snell must not carry udp-relay: %s", got)
 	}
 }
 

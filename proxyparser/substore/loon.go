@@ -65,6 +65,18 @@ func (p *LoonProducer) Produce(proxies []Proxy, outputType string, opts *Produce
 
 // ProduceOne converts a single proxy to Loon format
 func (p *LoonProducer) ProduceOne(proxy Proxy, outputType string, opts *ProduceOptions) (string, error) {
+	line, err := p.produceOne(proxy, outputType, opts)
+	if err != nil {
+		return "", err
+	}
+	// server-dns:解析节点服务器域名用的 DNS(上游 8c2a6956),所有协议通用,接在行尾
+	if serverDNS := GetStringSlice(proxy, "server-dns"); len(serverDNS) > 0 {
+		line += `,server-dns="` + strings.Join(serverDNS, ",") + `"`
+	}
+	return line, nil
+}
+
+func (p *LoonProducer) produceOne(proxy Proxy, outputType string, opts *ProduceOptions) (string, error) {
 	// Check for unsupported ws network with v2ray-http-upgrade
 	if GetString(proxy, "network") == "ws" {
 		if wsOpts := GetMap(proxy, "ws-opts"); wsOpts != nil {
