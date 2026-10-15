@@ -529,32 +529,15 @@ func (p *StashProducer) generateFullConfig(proxies []Proxy, opts *ProduceOptions
 		}
 	}
 
-	// Build final rule-providers map for Stash (convert mrs to yaml format)
+	// Build final rule-providers map for Stash. Stash 已支持 mrs 规则集,规则集按原样下发,
+	// 不再把 .mrs 改写成同名 .yaml(很多仓库没有同名 .yaml,改写后的地址可能是 404)。
 	finalRuleProviders := make(map[string]map[string]interface{})
 	for name := range ruleSetNames {
 		if ruleProviders != nil {
 			if existing, ok := ruleProviders[name].(map[string]interface{}); ok {
-				// Provider exists, check if it needs conversion from mrs to yaml
 				provider := make(map[string]interface{})
 				for k, v := range existing {
 					provider[k] = v
-				}
-
-				// Check format and URL
-				format, _ := provider["format"].(string)
-				url, _ := provider["url"].(string)
-
-				// Convert mrs format to yaml format
-				if format == "mrs" || strings.HasSuffix(url, ".mrs") {
-					provider["format"] = "yaml"
-					// Replace .mrs extension with .yaml in URL
-					if strings.HasSuffix(url, ".mrs") {
-						provider["url"] = strings.TrimSuffix(url, ".mrs") + ".yaml"
-					}
-					// Update path as well
-					if path, ok := provider["path"].(string); ok && strings.HasSuffix(path, ".mrs") {
-						provider["path"] = strings.TrimSuffix(path, ".mrs") + ".yaml"
-					}
 				}
 
 				finalRuleProviders[name] = provider
