@@ -145,7 +145,18 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 		case "anytls":
 			parsed, err = p.anytlsParser(proxy)
 		case "snell":
-			parsed, err = p.snellParser(proxy)
+			if isSnellShadowTLS(proxy) {
+				snellPart, stPart, err2 := p.snellShadowTLSParser(proxy)
+				if err2 == nil {
+					p.passthroughExtraFields(proxy, snellPart)
+					p.passthroughExtraFields(proxy, stPart)
+					list = append(list, snellPart)
+					list = append(list, stPart)
+				}
+				err = err2
+			} else {
+				parsed, err = p.snellParser(proxy)
+			}
 		case "naive":
 			parsed, err = p.naiveParser(proxy)
 		default:
@@ -1022,9 +1033,21 @@ func (p *SingboxProducer) shadowTLSParser(proxy Proxy) (map[string]interface{}, 
 		}
 	}
 
+	stPart, err := p.shadowTLSOutbound(proxy, name, port)
+	if err != nil {
+		return nil, nil, err
+	}
+	p.smuxParser(proxy, ssPart)
+
+	return ssPart, stPart, nil
+}
+
+// shadowTLSOutbound 由 plugin: shadow-tls 的节点生成 sing-box 的 shadowtls 出站(tag = <name>_shadowtls),
+// 承载它的 shadowsocks / snell 出站用 detour 指过来。
+func (p *SingboxProducer) shadowTLSOutbound(proxy Proxy, name string, port int) (map[string]interface{}, error) {
 	pluginOpts := GetMap(proxy, "plugin-opts")
 	if pluginOpts == nil {
-		return nil, nil, fmt.Errorf("plugin-opts required for shadow-tls")
+		return nil, fmt.Errorf("plugin-opts required for shadow-tls")
 	}
 
 	stPart := map[string]interface{}{
@@ -1063,11 +1086,39 @@ func (p *SingboxProducer) shadowTLSParser(proxy Proxy) (map[string]interface{}, 
 
 	p.tfoParser(proxy, stPart)
 	p.detourParser(proxy, stPart)
-	p.smuxParser(proxy, ssPart)
 	p.ipVersionParser(proxy, stPart)
 	p.domainResolverParser(proxy, stPart)
 
-	return ssPart, stPart, nil
+	return stPart, nil
+}
+
+// snellShadowTLSParser Snell + ShadowTLS:snell 出站不带 server,detour 到同名 _shadowtls 出站
+// (与 shadowsocks + shadow-tls 同一套写法)。sing-box 1.14 起有 snell 出站。
+func (p *SingboxProducer) snellShadowTLSParser(proxy Proxy) (map[string]interface{}, map[string]interface{}, error) {
+	np := snellShadowTLSAsPlugin(proxy)
+	if GetString(np, "plugin") != "shadow-tls" {
+		return nil, nil, fmt.Errorf("snell shadow-tls: only plugin / obfs-opts forms are supported")
+	}
+	port := GetInt(np, "port")
+	if port < 0 || port > 65535 {
+		return nil, nil, fmt.Errorf("invalid port")
+	}
+	if GetInt(np, "version") == 6 {
+		return nil, nil, fmt.Errorf("snell v6 does not support shadow-tls")
+	}
+	name := GetString(np, "name")
+	snellPart, err := p.snellParser(np)
+	if err != nil {
+		return nil, nil, err
+	}
+	delete(snellPart, "server")
+	delete(snellPart, "server_port")
+	snellPart["detour"] = fmt.Sprintf("%s_shadowtls", name)
+	stPart, err := p.shadowTLSOutbound(np, name, port)
+	if err != nil {
+		return nil, nil, err
+	}
+	return snellPart, stPart, nil
 }
 
 func (p *SingboxProducer) ssParser(proxy Proxy) (map[string]interface{}, error) {

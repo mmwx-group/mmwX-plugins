@@ -250,6 +250,9 @@ func (p *SurfboardProducer) anytls(proxy Proxy) (string, error) {
 
 // snell converts a snell proxy to Surfboard format
 func (p *SurfboardProducer) snell(proxy Proxy) (string, error) {
+	if isSnellShadowTLS(proxy) {
+		return "", fmt.Errorf("platform Surfboard does not support snell with shadow-tls")
+	}
 	if IsPresent(proxy, "version") {
 		version := GetInt(proxy, "version")
 		if version != 1 && version != 2 && version != 3 && version != 4 && version != 5 {

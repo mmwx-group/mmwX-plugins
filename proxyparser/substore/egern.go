@@ -1136,7 +1136,8 @@ func normalizeSnellVersion(proxy Proxy) (int, bool, bool) {
 
 // egernHasShadowTls 判断节点是否带 shadow-tls (Egern 的 Snell 不支持)
 func egernHasShadowTls(proxy Proxy) bool {
-	return GetString(proxy, "plugin") == "shadow-tls" ||
+	return isSnellShadowTLS(proxy) ||
+		GetString(proxy, "plugin") == "shadow-tls" ||
 		IsPresent(proxy, "shadow-tls-password") ||
 		IsPresent(proxy, "shadow-tls-sni") ||
 		IsPresent(proxy, "shadow-tls-version")

@@ -361,6 +361,8 @@ func (p *SurgeProducer) socks5(proxy Proxy) (string, error) {
 }
 
 func (p *SurgeProducer) snell(proxy Proxy) (string, error) {
+	// obfs-opts 里的 shadow-tls 换成 plugin 写法,下面 appendShadowTLS 才输出 shadow-tls-*,obfs 段也不会写成 obfs=shadow-tls
+	proxy = snellShadowTLSAsPlugin(proxy)
 	result := &Result{Proxy: proxy}
 	result.Append(fmt.Sprintf("%s=%s,%s,%d",
 		GetString(proxy, "name"),
