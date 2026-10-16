@@ -185,15 +185,15 @@ func TestBuildCompleteSurgeConfigUnchangedWithoutDrops(t *testing.T) {
 
 func shadowrocketPruneFixture() ([]Proxy, map[string]interface{}) {
 	proxies := []Proxy{
-		masterWireGuardProxy(),
+		{"name": "mi", "type": "mieru", "server": "1.2.3.4", "port": 2999, "username": "u", "password": "p", "transport": "TCP"},
 		{"name": "vl", "type": "vless", "server": "5.6.7.8", "port": 443, "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
 		{"name": "hy", "type": "hysteria2", "server": "9.9.9.9", "port": 443, "password": "pw"},
 	}
 	full := map[string]interface{}{
 		"proxy-groups": []interface{}{
-			map[string]interface{}{"name": "PROXY", "type": "select", "proxies": []interface{}{"wg-in", "vl"}},
-			map[string]interface{}{"name": "ONLYWG", "type": "select", "proxies": []interface{}{"wg-in"}},
-			map[string]interface{}{"name": "OUTER", "type": "select", "proxies": []interface{}{"ONLYWG", "hy"}},
+			map[string]interface{}{"name": "PROXY", "type": "select", "proxies": []interface{}{"mi", "vl"}},
+			map[string]interface{}{"name": "ONLYMI", "type": "select", "proxies": []interface{}{"mi"}},
+			map[string]interface{}{"name": "OUTER", "type": "select", "proxies": []interface{}{"ONLYMI"}},
 			map[string]interface{}{"name": "HYG", "type": "url-test", "proxies": []interface{}{"hy", "DIRECT"}},
 		},
 		"rule-providers": map[string]interface{}{
@@ -202,15 +202,40 @@ func shadowrocketPruneFixture() ([]Proxy, map[string]interface{}) {
 		"rules": []interface{}{
 			"DOMAIN-SUFFIX,b.com,PROXY",
 			"DOMAIN,a.com,OUTER",
-			"RULE-SET,prov,wg-in",
-			"MATCH,ONLYWG",
+			"RULE-SET,prov,mi",
+			"MATCH,ONLYMI",
 		},
 	}
 	return proxies, full
 }
 
-// 规格用例 {PROXY:[wg,vl], ONLYWG:[wg], FINAL,ONLYWG}(clash-to-shadowrocket),
-// 外加 conf 格式同样不支持的 hysteria2(写成注释)与级联。
+// srConfProxyNames / srConfGroups 按 Shadowrocket 语法(节点名称=类型,... / 名称 = 类型,成员,...)拆出节点名与组成员。
+func srConfProxyNames(out string) []string {
+	var names []string
+	for _, line := range confSection(out, "[Proxy]") {
+		names = append(names, strings.SplitN(line, "=", 2)[0])
+	}
+	return names
+}
+
+func srConfGroups(out string) map[string][]string {
+	groups := make(map[string][]string)
+	for _, line := range confSection(out, "[Proxy Group]") {
+		kv := strings.SplitN(line, " = ", 2)
+		fields := strings.Split(kv[1], ",")
+		members := []string{}
+		for _, f := range fields[1:] {
+			if !strings.Contains(f, "=") {
+				members = append(members, f)
+			}
+		}
+		groups[kv[0]] = members
+	}
+	return groups
+}
+
+// 规格用例 {PROXY:[mi,vl], ONLYMI:[mi], FINAL,ONLYMI}(clash-to-shadowrocket):
+// 写不出来的 Mieru 留注释、组被剔空就删并级联(OUTER 只含 ONLYMI),规则改 DIRECT。
 func TestShadowrocketTemplatePrunesDanglingPolicies(t *testing.T) {
 	proxies, full := shadowrocketPruneFixture()
 	raw, err := NewShadowrocketTemplateProducer().Produce(proxies, "", &ProduceOptions{FullConfig: full})
@@ -218,34 +243,16 @@ func TestShadowrocketTemplatePrunesDanglingPolicies(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := raw.(string)
-	if strings.Contains(out, "wg-in") {
-		t.Errorf("输出里不应再有 wg-in:\n%s", out)
-	}
-	for _, bad := range []string{"ONLYWG", "OUTER"} {
-		if strings.Contains(out, bad) {
-			t.Errorf("被剔空的组 %s 应整组删除(含引用):\n%s", bad, out)
-		}
+	if !strings.Contains(out, "# 已跳过 mieru: mi(") {
+		t.Errorf("跳过的节点应留注释:\n%s", out)
 	}
 
-	var proxyNames []string
-	for _, line := range confSection(out, "[Proxy]") {
-		proxyNames = append(proxyNames, strings.SplitN(line, ",", 2)[0])
+	proxyNames := srConfProxyNames(out)
+	if !reflect.DeepEqual(proxyNames, []string{"vl", "hy"}) {
+		t.Errorf("[Proxy] 应为 vl、hy,得到 %v\n%s", proxyNames, out)
 	}
-	if !reflect.DeepEqual(proxyNames, []string{"vl"}) {
-		t.Errorf("[Proxy] 应只有 vl,得到 %v\n%s", proxyNames, out)
-	}
-	groups := make(map[string][]string)
-	for _, line := range confSection(out, "[Proxy Group]") {
-		fields := strings.Split(line, ",")
-		var members []string
-		for _, f := range fields[2:] {
-			if !strings.Contains(f, "=") {
-				members = append(members, f)
-			}
-		}
-		groups[fields[0]] = members
-	}
-	if want := map[string][]string{"PROXY": {"vl"}, "HYG": {"DIRECT"}}; !reflect.DeepEqual(groups, want) {
+	groups := srConfGroups(out)
+	if want := map[string][]string{"PROXY": {"vl"}, "HYG": {"hy", "DIRECT"}}; !reflect.DeepEqual(groups, want) {
 		t.Errorf("组 = %v, want %v\n%s", groups, want, out)
 	}
 	rules := confSection(out, "[Rule]")
@@ -262,7 +269,7 @@ func TestShadowrocketTemplatePrunesDanglingPolicies(t *testing.T) {
 
 	// 不改调用方的完整配置
 	first := full["proxy-groups"].([]interface{})[0].(map[string]interface{})
-	if !reflect.DeepEqual(first["proxies"], []interface{}{"wg-in", "vl"}) {
+	if !reflect.DeepEqual(first["proxies"], []interface{}{"mi", "vl"}) {
 		t.Errorf("调用方的 proxy-groups 被改了: %v", first["proxies"])
 	}
 }

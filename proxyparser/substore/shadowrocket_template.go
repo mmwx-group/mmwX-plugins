@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -75,20 +77,20 @@ func (p *ShadowrocketTemplateProducer) produceFullConfig(proxies []Proxy, opts *
 	sb.WriteString("\n")
 
 	// [Proxy]
-	proxySection, outputNames := p.generateProxies(proxies, opts)
+	proxySection, outputNames, outputOrder := p.generateProxies(proxies, opts)
 	sb.WriteString(proxySection)
 	sb.WriteString("\n")
 
-	// 不支持的节点(WireGuard、其它写成注释的类型、被过滤的)没有输出,
+	// 写不出来的节点(Mieru、多 peer 的 WireGuard 等)没有输出,
 	// 组和规则里指向它们的名字要一并清理(见 policy_prune.go)。
 	inputNames := make([]string, 0, len(proxies))
 	for _, proxy := range proxies {
 		inputNames = append(inputNames, GetString(proxy, "name"))
 	}
-	groups := shadowrocketProxyGroups(opts.FullConfig)
+	groups := srExpandProxyGroups(shadowrocketProxyGroups(opts.FullConfig), outputOrder)
 	groupRefs := make([]policyGroupMembers, len(groups))
 	for i, g := range groups {
-		groupRefs[i] = policyGroupMembers{Name: GetString(g, "name"), Members: GetStringSlice(g, "proxies")}
+		groupRefs[i] = policyGroupMembers{Name: g.name, Members: g.members, Empty: g.empty}
 	}
 	pruned := prunePolicyGroups(groupRefs, inputNames, outputNames)
 
@@ -180,14 +182,26 @@ func (p *ShadowrocketTemplateProducer) extractIPv6Config(fullConfig map[string]i
 	return false
 }
 
-// generateProxies 生成 [Proxy] 部分,同时返回实际输出了的节点名(写成注释的不算)
-func (p *ShadowrocketTemplateProducer) generateProxies(proxies []Proxy, opts *ProduceOptions) (string, map[string]bool) {
+// generateProxies 生成 [Proxy] 部分,同时返回实际输出了的节点名(写成注释的不算)及其顺序。
+// 写不出来的节点一律留一行注释说明原因 —— 以前有几类是静默丢掉的,节点全丢光时
+// 用户只看到空的 [Proxy] 和全变成 DIRECT 的规则,无从查起。
+func (p *ShadowrocketTemplateProducer) generateProxies(proxies []Proxy, opts *ProduceOptions) (string, map[string]bool, []string) {
 	var sb strings.Builder
 	sb.WriteString("[Proxy]\n")
 	sb.WriteString("# 节点配置\n")
 
 	outputNames := make(map[string]bool)
+	var outputOrder []string
 	transformed := p.transformProxies(proxies, opts)
+	kept := make(map[string]bool, len(transformed))
+	for _, proxy := range transformed {
+		kept[GetString(proxy, "name")] = true
+	}
+	for _, proxy := range proxies {
+		if name := GetString(proxy, "name"); !kept[name] {
+			sb.WriteString(fmt.Sprintf("# 已跳过 %s: %s(Shadowrocket 不支持)\n", GetString(proxy, "type"), name))
+		}
+	}
 
 	for _, proxy := range transformed {
 		proxyType := GetString(proxy, "type")
@@ -197,274 +211,379 @@ func (p *ShadowrocketTemplateProducer) generateProxies(proxies []Proxy, opts *Pr
 		if opts != nil && opts.ClientCompatibilityMode {
 			if proxyType == "wireguard" {
 				log.Printf("[兼容模式] 已过滤不支持的节点类型 '%s': %s", proxyType, name)
+				sb.WriteString(fmt.Sprintf("# 已跳过 %s: %s(兼容模式)\n", proxyType, name))
 				continue
 			}
-			// 可以添加更多不兼容的节点类型
 		}
 
-		proxyLine := p.formatProxyLine(proxy)
-		if proxyLine != "" {
-			sb.WriteString(proxyLine)
-			sb.WriteString("\n")
-			if !strings.HasPrefix(proxyLine, "#") {
-				outputNames[name] = true
-			}
+		line, reason := p.formatProxyLine(proxy)
+		if line == "" {
+			log.Printf("[Shadowrocket] 跳过节点 %s (%s): %s", name, proxyType, reason)
+			sb.WriteString(fmt.Sprintf("# 已跳过 %s: %s(%s)\n", proxyType, name, reason))
+			continue
 		}
+		sb.WriteString(line)
+		sb.WriteString("\n")
+		outputNames[name] = true
+		outputOrder = append(outputOrder, name)
 	}
 
-	return sb.String(), outputNames
+	return sb.String(), outputNames, outputOrder
 }
 
-// formatProxyLine 将节点转换为 Shadowrocket 单行格式
-func (p *ShadowrocketTemplateProducer) formatProxyLine(proxy Proxy) string {
+// formatProxyLine 把节点写成 Shadowrocket 配置文件里的本地节点:
+//
+//	节点名称=类型,地址,端口,参数=值,...
+//
+// 语法与参数名以 Shadowrocket 官方手册(github.com/LOWERTOP/Shadowrocket「编写本地节点」)为准,
+// 手册没列的参数沿用 Shadowrocket 自己的分享链接参数(peer / xtls / pbk / sid / obfsParam / path),
+// 两者是同一套解析。写不出来时返回空串和原因。
+func (p *ShadowrocketTemplateProducer) formatProxyLine(proxy Proxy) (string, string) {
 	proxyType := GetString(proxy, "type")
 	name := GetString(proxy, "name")
 	server := GetString(proxy, "server")
 	port := GetInt(proxy, "port")
 
 	if name == "" || server == "" || port == 0 {
-		return ""
+		return "", "缺少名称、地址或端口"
 	}
 
-	// 构建参数列表
+	typ := proxyType
 	var params []string
-	params = append(params, name)
-	params = append(params, proxyType)
-	params = append(params, server)
-	params = append(params, fmt.Sprintf("%d", port))
+	add := func(k, v string) {
+		if v != "" {
+			params = append(params, k+"="+v)
+		}
+	}
+	addUDP := func() {
+		if GetBool(proxy, "udp") {
+			params = append(params, "udp=1")
+		}
+	}
 
 	switch proxyType {
 	case "ss":
-		// Shadowsocks: name=ss,server,port,encrypt-method=xxx,password=xxx,obfs=xxx,obfs-host=xxx,tfo=1
-		if method := GetString(proxy, "cipher"); method != "" {
-			params = append(params, fmt.Sprintf("encrypt-method=%s", method))
-		}
-		if password := GetString(proxy, "password"); password != "" {
-			params = append(params, fmt.Sprintf("password=%s", password))
-		}
-		if plugin := GetString(proxy, "plugin"); plugin != "" {
-			if pluginOpts := GetMap(proxy, "plugin-opts"); pluginOpts != nil {
-				if mode := GetString(pluginOpts, "mode"); mode != "" {
-					params = append(params, fmt.Sprintf("obfs=%s", mode))
-				}
-				if host := GetString(pluginOpts, "host"); host != "" {
-					params = append(params, fmt.Sprintf("obfs-host=%s", host))
+		add("method", GetString(proxy, "cipher"))
+		add("password", GetString(proxy, "password"))
+		switch plugin := GetString(proxy, "plugin"); plugin {
+		case "":
+		case "obfs", "simple-obfs":
+			if po := GetMap(proxy, "plugin-opts"); po != nil {
+				add("obfs", GetString(po, "mode"))
+				add("obfs-host", GetString(po, "host"))
+			}
+		case "v2ray-plugin":
+			po := GetMap(proxy, "plugin-opts")
+			if po == nil || GetString(po, "mode") != "websocket" {
+				return "", "v2ray-plugin 只支持 websocket 模式"
+			}
+			params = append(params, "obfs=websocket")
+			add("path", GetString(po, "path"))
+			add("obfsParam", GetString(po, "host"))
+			if GetBool(po, "tls") {
+				params = append(params, "tls=true")
+				add("peer", GetString(po, "host"))
+				if GetBool(po, "skip-cert-verify") {
+					params = append(params, "allowInsecure=1")
 				}
 			}
+		default:
+			return "", "不支持插件 " + plugin
 		}
-		if udp := GetBool(proxy, "udp"); udp {
-			params = append(params, "udp-relay=true")
-		}
-		if tfo := GetBool(proxy, "tfo"); tfo {
-			params = append(params, "tfo=1")
-		}
+		addUDP()
 
 	case "vmess":
-		// VMess: name=vmess,server,port,username=uuid,alterId=0,method=auto,tls=true,skip-cert-verify=true,obfs=websocket,obfs-path=/,obfs-header=Host:xxx,tfo=1
-		if uuid := GetString(proxy, "uuid"); uuid != "" {
-			params = append(params, fmt.Sprintf("username=%s", uuid))
-		}
-		alterId := GetInt(proxy, "alterId")
-		params = append(params, fmt.Sprintf("alterId=%d", alterId))
-
+		add("password", GetString(proxy, "uuid"))
 		cipher := GetString(proxy, "cipher")
 		if cipher == "" {
 			cipher = "auto"
 		}
-		params = append(params, fmt.Sprintf("method=%s", cipher))
-
-		if tls := GetBool(proxy, "tls"); tls {
-			params = append(params, "tls=true")
-			if skipCertVerify := GetBool(proxy, "skip-cert-verify"); skipCertVerify {
-				params = append(params, "skip-cert-verify=true")
-			}
-			// transformProxies 已将 sni 转换为 servername
-			if servername := GetString(proxy, "servername"); servername != "" {
-				params = append(params, fmt.Sprintf("sni=%s", servername))
-			}
-		}
-
-		network := GetString(proxy, "network")
-		if network != "" {
-			switch network {
-			case "ws":
-				params = append(params, "obfs=websocket")
-				if wsOpts := GetMap(proxy, "ws-opts"); wsOpts != nil {
-					if path := GetString(wsOpts, "path"); path != "" {
-						params = append(params, fmt.Sprintf("obfs-path=%s", path))
-					}
-					if headers := GetMap(wsOpts, "headers"); headers != nil {
-						if host := GetString(headers, "Host"); host != "" {
-							params = append(params, fmt.Sprintf("obfs-header=Host:%s", host))
-						}
-					}
-				}
-			case "h2", "http":
-				params = append(params, "obfs=http")
-				if h2Opts := GetMap(proxy, "h2-opts"); h2Opts != nil {
-					if path := GetString(h2Opts, "path"); path != "" {
-						params = append(params, fmt.Sprintf("obfs-path=%s", path))
-					}
-					if host := GetString(h2Opts, "host"); host != "" {
-						params = append(params, fmt.Sprintf("obfs-header=Host:%s", host))
-					}
-				}
-			case "grpc":
-				params = append(params, "obfs=grpc")
-				if grpcOpts := GetMap(proxy, "grpc-opts"); grpcOpts != nil {
-					if serviceName := GetString(grpcOpts, "grpc-service-name"); serviceName != "" {
-						params = append(params, fmt.Sprintf("obfs-path=%s", serviceName))
-					}
-				}
-			}
-		}
-
-		if tfo := GetBool(proxy, "tfo"); tfo {
-			params = append(params, "tfo=1")
-		}
+		add("method", cipher)
+		params = append(params, fmt.Sprintf("alterId=%d", GetInt(proxy, "alterId")))
+		srConfTLS(proxy, &params, GetBool(proxy, "tls"))
+		srConfTransport(proxy, &params)
+		addUDP()
 
 	case "vless":
-		// VLESS: name=vless,server,port,username=uuid,tls=true,skip-cert-verify=true,sni=xxx,obfs=websocket,obfs-path=/,obfs-header=Host:xxx,tfo=1
-		if uuid := GetString(proxy, "uuid"); uuid != "" {
-			params = append(params, fmt.Sprintf("username=%s", uuid))
+		add("password", GetString(proxy, "uuid"))
+		srConfTLS(proxy, &params, GetBool(proxy, "tls"))
+		switch flow := GetString(proxy, "flow"); flow {
+		case "":
+		case "xtls-rprx-vision":
+			params = append(params, "xtls=2")
+		default:
+			return "", "不支持 flow " + flow
+		}
+		srConfTransport(proxy, &params)
+		addUDP()
+
+	case "trojan":
+		add("password", GetString(proxy, "password"))
+		srConfTLS(proxy, &params, true)
+		srConfTransport(proxy, &params)
+		addUDP()
+
+	case "http", "https", "socks5", "socks":
+		// 手册:节点名称=http,地址,端口,用户,密码(位置参数)
+		tls := proxyType == "https" || GetBool(proxy, "tls")
+		switch {
+		case (proxyType == "http" || proxyType == "https") && tls:
+			typ = "https"
+		case proxyType == "http" || proxyType == "https":
+			typ = "http"
+		case tls:
+			typ = "socks5-tls"
+		default:
+			typ = "socks5"
+		}
+		user, pass := GetString(proxy, "username"), GetString(proxy, "password")
+		if user != "" || pass != "" {
+			params = append(params, user, pass)
+		}
+		if tls && GetBool(proxy, "skip-cert-verify") {
+			params = append(params, "skip-common-name-verify=true")
+		}
+		if typ == "socks5" || typ == "socks5-tls" {
+			addUDP()
 		}
 
-		if tls := GetBool(proxy, "tls"); tls {
-			params = append(params, "tls=true")
-			if skipCertVerify := GetBool(proxy, "skip-cert-verify"); skipCertVerify {
-				params = append(params, "skip-cert-verify=true")
-			}
-			// transformProxies 已将 sni 转换为 servername
-			if servername := GetString(proxy, "servername"); servername != "" {
-				params = append(params, fmt.Sprintf("sni=%s", servername))
+	case "hysteria2":
+		add("auth", GetString(proxy, "password"))
+		if GetString(proxy, "obfs") != "" {
+			add("obfsParam", GetString(proxy, "obfs-password"))
+		}
+		srConfTLS(proxy, &params, true)
+		params = append(params, "udp=1")
+
+	case "hysteria":
+		add("auth", firstNonBlank(GetString(proxy, "auth-str"), GetString(proxy, "auth_str")))
+		add("obfsParam", GetString(proxy, "obfs"))
+		add("protocol", GetString(proxy, "protocol"))
+		if up := srMbps(proxy, "up"); up > 0 {
+			params = append(params, fmt.Sprintf("upmbps=%d", up))
+		}
+		if down := srMbps(proxy, "down"); down > 0 {
+			params = append(params, fmt.Sprintf("downmbps=%d", down))
+		}
+		srConfTLS(proxy, &params, true)
+		params = append(params, "udp=1")
+
+	case "tuic":
+		if GetString(proxy, "token") != "" && GetString(proxy, "uuid") == "" {
+			return "", "不支持 TUIC v4"
+		}
+		add("password", GetString(proxy, "password"))
+		add("user", GetString(proxy, "uuid"))
+		srConfTLS(proxy, &params, true)
+		params = append(params, "udp=1")
+
+	case "anytls":
+		add("password", GetString(proxy, "password"))
+		srConfTLS(proxy, &params, true)
+		addUDP()
+
+	case "snell":
+		if obfs := GetMap(proxy, "obfs-opts"); obfs != nil && GetString(obfs, "mode") == "shadow-tls" {
+			return "", "配置文件写不了 ShadowTLS"
+		}
+		add("password", GetString(proxy, "psk"))
+		if v := GetInt(proxy, "version"); v > 0 {
+			params = append(params, fmt.Sprintf("version=%d", v))
+		}
+		if obfs := GetMap(proxy, "obfs-opts"); obfs != nil {
+			add("obfs", GetString(obfs, "mode"))
+			add("obfs-host", GetString(obfs, "host"))
+		}
+		addUDP()
+
+	case "wireguard":
+		if peers, ok := proxy["peers"].([]interface{}); ok && len(peers) > 1 {
+			return "", "不支持多个 peer"
+		}
+		if GetString(proxy, "preshared-key") != "" {
+			return "", "配置文件写不了 pre-shared-key"
+		}
+		add("privateKey", GetString(proxy, "private-key"))
+		add("publicKey", GetString(proxy, "public-key"))
+		add("ip", GetString(proxy, "ip"))
+		params = append(params, "udp=1")
+		if dns := srStrings(proxy, "dns"); len(dns) > 0 {
+			add("dns", dns[0])
+		}
+		if mtu := GetInt(proxy, "mtu"); mtu > 0 {
+			params = append(params, fmt.Sprintf("mtu=%d", mtu))
+		}
+		if ka := GetInt(proxy, "keepalive"); ka > 0 {
+			params = append(params, fmt.Sprintf("keepalive=%d", ka))
+		}
+		add("reserved", srWireGuardReserved(proxy["reserved"]))
+
+	default:
+		return "", "Shadowrocket 配置文件不支持此类型"
+	}
+
+	if GetBool(proxy, "tfo") || GetBool(proxy, "fast-open") {
+		params = append(params, "tfo=1")
+	}
+
+	return fmt.Sprintf("%s=%s,%s,%d", name, typ, server, port) + srJoinParams(params), ""
+}
+
+func srJoinParams(params []string) string {
+	if len(params) == 0 {
+		return ""
+	}
+	return "," + strings.Join(params, ",")
+}
+
+// srConfTLS 写 TLS 相关参数。tls 为 false 时什么都不写;tls=true 只有 vmess / vless 要写
+// (手册里 trojan / hysteria2 / tuic 本身就是 TLS,不带这个参数)。
+// SNI 在 Shadowrocket 里叫 peer;跳过证书校验是 allowInsecure=1;REALITY 是 pbk / sid。
+func srConfTLS(proxy Proxy, params *[]string, tls bool) {
+	if !tls {
+		return
+	}
+	if t := GetString(proxy, "type"); t == "vmess" || t == "vless" {
+		*params = append(*params, "tls=true")
+	}
+	if sni := firstNonBlank(GetString(proxy, "servername"), GetString(proxy, "sni")); sni != "" {
+		*params = append(*params, "peer="+sni)
+	}
+	if GetBool(proxy, "skip-cert-verify") {
+		*params = append(*params, "allowInsecure=1")
+	}
+	// 多个 ALPN 要用逗号分隔,会和参数分隔符冲突,只在单个时写
+	if alpn := srStrings(proxy, "alpn"); len(alpn) == 1 {
+		*params = append(*params, "alpn="+alpn[0])
+	}
+	if fp := GetString(proxy, "client-fingerprint"); fp != "" {
+		*params = append(*params, "fp="+fp)
+	}
+	if reality := GetMap(proxy, "reality-opts"); reality != nil {
+		if pbk := GetString(reality, "public-key"); pbk != "" {
+			*params = append(*params, "pbk="+pbk)
+		}
+		if sid := GetString(reality, "short-id"); sid != "" {
+			*params = append(*params, "sid="+sid)
+		}
+	}
+}
+
+// srConfTransport 写传输层:obfs=websocket / grpc / h2 / http / xhttp,路径用 path(gRPC 是服务名),
+// Host 用 obfsParam。
+func srConfTransport(proxy Proxy, params *[]string) {
+	set := func(obfs, path, host string) {
+		*params = append(*params, "obfs="+obfs)
+		if path != "" {
+			*params = append(*params, "path="+path)
+		}
+		if host != "" {
+			*params = append(*params, "obfsParam="+host)
+		}
+	}
+	switch GetString(proxy, "network") {
+	case "ws":
+		opts := GetMap(proxy, "ws-opts")
+		if opts == nil {
+			set("websocket", "", "")
+			return
+		}
+		host := ""
+		if headers := GetMap(opts, "headers"); headers != nil {
+			host = firstNonBlank(GetString(headers, "Host"), GetString(headers, "host"))
+		}
+		set("websocket", GetString(opts, "path"), host)
+	case "grpc":
+		opts := GetMap(proxy, "grpc-opts")
+		path := ""
+		if opts != nil {
+			path = GetString(opts, "grpc-service-name")
+		}
+		set("grpc", path, "")
+	case "h2":
+		opts := GetMap(proxy, "h2-opts")
+		path, host := "", ""
+		if opts != nil {
+			path = GetString(opts, "path")
+			if hosts := srStrings(opts, "host"); len(hosts) > 0 {
+				host = hosts[0]
 			}
 		}
-
-		// Flow
-		if flow := GetString(proxy, "flow"); flow != "" {
-			params = append(params, fmt.Sprintf("flow=%s", flow))
-		}
-
-		// 处理 xhttp/splithttp (transformProxies 已设置 obfs, path, obfsParam)
-		if obfs := GetString(proxy, "obfs"); obfs == "xhttp" {
-			params = append(params, "obfs=xhttp")
-			if path := GetString(proxy, "path"); path != "" {
-				params = append(params, fmt.Sprintf("obfs-path=%s", path))
+		set("h2", path, host)
+	case "http":
+		opts := GetMap(proxy, "http-opts")
+		path, host := "", ""
+		if opts != nil {
+			if paths := srStrings(opts, "path"); len(paths) > 0 {
+				path = paths[0]
 			}
-			if obfsParam := GetString(proxy, "obfsParam"); obfsParam != "" {
-				params = append(params, fmt.Sprintf("obfs-header=Host:%s", obfsParam))
-			}
-		} else {
-			// 处理其他 network 类型
-			network := GetString(proxy, "network")
-			if network != "" {
-				switch network {
-				case "ws":
-					params = append(params, "obfs=websocket")
-					if wsOpts := GetMap(proxy, "ws-opts"); wsOpts != nil {
-						if path := GetString(wsOpts, "path"); path != "" {
-							params = append(params, fmt.Sprintf("obfs-path=%s", path))
-						}
-						if headers := GetMap(wsOpts, "headers"); headers != nil {
-							if host := GetString(headers, "Host"); host != "" {
-								params = append(params, fmt.Sprintf("obfs-header=Host:%s", host))
-							}
-						}
-					}
-				case "h2", "http":
-					params = append(params, "obfs=http")
-					if h2Opts := GetMap(proxy, "h2-opts"); h2Opts != nil {
-						if path := GetString(h2Opts, "path"); path != "" {
-							params = append(params, fmt.Sprintf("obfs-path=%s", path))
-						}
-						if host := GetString(h2Opts, "host"); host != "" {
-							params = append(params, fmt.Sprintf("obfs-header=Host:%s", host))
-						}
-					}
-				case "grpc":
-					params = append(params, "obfs=grpc")
-					if grpcOpts := GetMap(proxy, "grpc-opts"); grpcOpts != nil {
-						if serviceName := GetString(grpcOpts, "grpc-service-name"); serviceName != "" {
-							params = append(params, fmt.Sprintf("obfs-path=%s", serviceName))
-						}
-					}
+			if headers := GetMap(opts, "headers"); headers != nil {
+				if hosts := srStrings(headers, "Host"); len(hosts) > 0 {
+					host = hosts[0]
 				}
 			}
 		}
-
-		if tfo := GetBool(proxy, "tfo"); tfo {
-			params = append(params, "tfo=1")
-		}
-
-	case "trojan":
-		// Trojan: name=trojan,server,port,password=xxx,skip-cert-verify=true,sni=xxx,tfo=1
-		if password := GetString(proxy, "password"); password != "" {
-			params = append(params, fmt.Sprintf("password=%s", password))
-		}
-		if skipCertVerify := GetBool(proxy, "skip-cert-verify"); skipCertVerify {
-			params = append(params, "skip-cert-verify=true")
-		}
-		if sni := GetString(proxy, "sni"); sni != "" {
-			params = append(params, fmt.Sprintf("sni=%s", sni))
-		}
-		if tfo := GetBool(proxy, "tfo"); tfo {
-			params = append(params, "tfo=1")
-		}
-		if udp := GetBool(proxy, "udp"); udp {
-			params = append(params, "udp-relay=true")
-		}
-
-	case "http", "https":
-		// HTTP/HTTPS: name=http,server,port,username=xxx,password=xxx,tls=true,skip-cert-verify=true,tfo=1
-		if username := GetString(proxy, "username"); username != "" {
-			params = append(params, fmt.Sprintf("username=%s", username))
-		}
-		if password := GetString(proxy, "password"); password != "" {
-			params = append(params, fmt.Sprintf("password=%s", password))
-		}
-		if proxyType == "https" || GetBool(proxy, "tls") {
-			params = append(params, "tls=true")
-			if skipCertVerify := GetBool(proxy, "skip-cert-verify"); skipCertVerify {
-				params = append(params, "skip-cert-verify=true")
-			}
-		}
-		if tfo := GetBool(proxy, "tfo"); tfo {
-			params = append(params, "tfo=1")
-		}
-
-	case "socks5", "socks":
-		// SOCKS5: name=socks5,server,port,username=xxx,password=xxx,tls=true,skip-cert-verify=true,tfo=1
-		if username := GetString(proxy, "username"); username != "" {
-			params = append(params, fmt.Sprintf("username=%s", username))
-		}
-		if password := GetString(proxy, "password"); password != "" {
-			params = append(params, fmt.Sprintf("password=%s", password))
-		}
-		if tls := GetBool(proxy, "tls"); tls {
-			params = append(params, "tls=true")
-			if skipCertVerify := GetBool(proxy, "skip-cert-verify"); skipCertVerify {
-				params = append(params, "skip-cert-verify=true")
-			}
-		}
-		if tfo := GetBool(proxy, "tfo"); tfo {
-			params = append(params, "tfo=1")
-		}
-		if udp := GetBool(proxy, "udp"); udp {
-			params = append(params, "udp-relay=true")
-		}
-
-	case "wireguard":
-		// conf 格式不输出 WG:直接剔除,不留「需要手动配置」的注释 —— 注释里没有密钥,
-		// 用户也配不出来;组 / 规则里指向它的名字由 policy_prune 一并清理。
-		log.Printf("[Shadowrocket] 不支持 WireGuard 节点,已剔除: %s", name)
-		return ""
-
-	default:
-		log.Printf("[Shadowrocket] 不支持的节点类型: %s (%s)", proxyType, name)
-		return fmt.Sprintf("# 不支持的节点类型 %s: %s", proxyType, name)
+		set("http", path, host)
+	case "xhttp", "splithttp":
+		// transformProxies 已把路径 / Host 提到 path / obfsParam
+		set("xhttp", GetString(proxy, "path"), GetString(proxy, "obfsParam"))
 	}
+}
 
-	return strings.Join(params, ",")
+// srMbps 取 hysteria 的 up / down(可能写成 "100 Mbps"),只留数字部分。
+func srMbps(proxy Proxy, key string) int {
+	if n := GetInt(proxy, key); n > 0 {
+		return n
+	}
+	s := strings.TrimSpace(GetString(proxy, key))
+	end := 0
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	n, _ := strconv.Atoi(s[:end])
+	return n
+}
+
+// srWireGuardReserved 把 reserved([1,2,3] 或 "1,2,3")写成 Shadowrocket 的 1/2/3。
+func srWireGuardReserved(v interface{}) string {
+	var parts []string
+	switch r := v.(type) {
+	case []interface{}:
+		for _, x := range r {
+			parts = append(parts, strings.TrimSpace(fmt.Sprint(x)))
+		}
+	case []int:
+		for _, x := range r {
+			parts = append(parts, strconv.Itoa(x))
+		}
+	case string:
+		for _, x := range strings.Split(r, ",") {
+			if x = strings.TrimSpace(x); x != "" {
+				parts = append(parts, x)
+			}
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+// srStrings 取字符串列表;单个字符串(alpn: h3、host: a.com)也当成一项。
+func srStrings(m map[string]interface{}, key string) []string {
+	if s, ok := m[key].(string); ok {
+		if s = strings.TrimSpace(s); s != "" {
+			return []string{s}
+		}
+		return nil
+	}
+	return GetStringSlice(m, key)
+}
+
+func firstNonBlank(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // shadowrocketProxyGroups 取完整配置里的 proxy-groups(只要映射形式的条目)
@@ -480,31 +599,112 @@ func shadowrocketProxyGroups(fullConfig map[string]interface{}) []map[string]int
 	return groups
 }
 
+// srProxyGroup 是展开后的代理组。
+type srProxyGroup struct {
+	raw     map[string]interface{}
+	name    string
+	members []string
+	// regex 非空表示 filter 用了 Go 正则不认的写法(如前瞻),原样交给 Shadowrocket 的 policy-regex-filter 去筛
+	regex string
+	// empty 表示组确定没有任何成员(或类型写不出来),整组删除,引用它的地方一并清理
+	empty bool
+}
+
+// srExpandProxyGroups 把 mihomo 运行时才取节点的写法展开成显式成员:
+// include-all / include-all-proxies 取全部输出了的节点,再按 filter / exclude-filter / exclude-type 筛。
+// Shadowrocket 配置里没有 include-all;不展开的话这类组没有成员、整组不输出,
+// 规则里指向它的地方就全悬空了。use(proxy-providers)的节点不在订阅里,取不到。
+func srExpandProxyGroups(groups []map[string]interface{}, outputOrder []string) []srProxyGroup {
+	result := make([]srProxyGroup, 0, len(groups))
+	for _, g := range groups {
+		sg := srProxyGroup{raw: g, name: GetString(g, "name")}
+		sg.members = append(sg.members, GetStringSlice(g, "proxies")...)
+
+		if GetString(g, "type") == "relay" {
+			log.Printf("[Shadowrocket] relay类型不支持，跳过: %s", sg.name)
+			sg.empty = true
+			result = append(result, sg)
+			continue
+		}
+
+		if GetBool(g, "include-all") || GetBool(g, "include-all-proxies") {
+			nodes, regex := srFilterNodes(outputOrder, g)
+			sg.regex = regex
+			seen := make(map[string]bool, len(sg.members))
+			for _, m := range sg.members {
+				seen[m] = true
+			}
+			for _, n := range nodes {
+				if !seen[n] {
+					sg.members = append(sg.members, n)
+				}
+			}
+		}
+		sg.empty = len(sg.members) == 0 && sg.regex == ""
+		result = append(result, sg)
+	}
+	return result
+}
+
+// srFilterNodes 按组的 filter / exclude-filter 筛节点(mihomo 里多个表达式用反引号分隔,满足任一即可)。
+// filter 编译不过时(mihomo 用的 regexp2 支持前瞻,Go 正则不支持)不展开,返回原式交给 Shadowrocket。
+func srFilterNodes(names []string, g map[string]interface{}) ([]string, string) {
+	compile := func(expr string) ([]*regexp.Regexp, bool) {
+		var res []*regexp.Regexp
+		for _, part := range strings.Split(expr, "`") {
+			if part == "" {
+				continue
+			}
+			re, err := regexp.Compile(part)
+			if err != nil {
+				return nil, false
+			}
+			res = append(res, re)
+		}
+		return res, true
+	}
+	matchAny := func(res []*regexp.Regexp, s string) bool {
+		for _, re := range res {
+			if re.MatchString(s) {
+				return true
+			}
+		}
+		return false
+	}
+
+	filter := GetString(g, "filter")
+	include, ok := compile(filter)
+	if !ok {
+		return nil, filter
+	}
+	exclude, _ := compile(GetString(g, "exclude-filter"))
+
+	var out []string
+	for _, n := range names {
+		if len(include) > 0 && !matchAny(include, n) {
+			continue
+		}
+		if matchAny(exclude, n) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, ""
+}
+
 // generateProxyGroups 生成 [Proxy Group] 部分。pruned 与 groups 一一对应:
-// 被剔空的组整组不输出,其余组用剔除悬空名字后的成员。
-func (p *ShadowrocketTemplateProducer) generateProxyGroups(groups []map[string]interface{}, pruned *policyPruneResult) string {
+// 被删掉的组整组不输出,其余组用剔除悬空名字后的成员。
+func (p *ShadowrocketTemplateProducer) generateProxyGroups(groups []srProxyGroup, pruned *policyPruneResult) string {
 	var sb strings.Builder
 	sb.WriteString("[Proxy Group]\n")
 	sb.WriteString("# 代理分组\n")
 
-	for i, groupMap := range groups {
-		if pruned.Removed[GetString(groupMap, "name")] {
+	for i, g := range groups {
+		if pruned.Removed[g.name] {
 			continue
 		}
-		// 浅拷贝后替换成员,不改调用方的完整配置
-		group := make(map[string]interface{}, len(groupMap))
-		for k, v := range groupMap {
-			group[k] = v
-		}
-		members := make([]interface{}, 0, len(pruned.Members[i]))
-		for _, m := range pruned.Members[i] {
-			members = append(members, m)
-		}
-		group["proxies"] = members
-
-		groupLine := p.formatProxyGroupLine(group)
-		if groupLine != "" {
-			sb.WriteString(groupLine)
+		if line := p.formatProxyGroupLine(g, pruned.Members[i]); line != "" {
+			sb.WriteString(line)
 			sb.WriteString("\n")
 		}
 	}
@@ -512,63 +712,60 @@ func (p *ShadowrocketTemplateProducer) generateProxyGroups(groups []map[string]i
 	return sb.String()
 }
 
-// formatProxyGroupLine 格式化代理组行
-func (p *ShadowrocketTemplateProducer) formatProxyGroupLine(group map[string]interface{}) string {
-	name := GetString(group, "name")
-	groupType := GetString(group, "type")
-
-	if name == "" || groupType == "" {
+// formatProxyGroupLine 格式化代理组行:名称 = 类型,成员...,参数=值
+func (p *ShadowrocketTemplateProducer) formatProxyGroupLine(g srProxyGroup, members []string) string {
+	groupType := GetString(g.raw, "type")
+	if g.name == "" || groupType == "" {
 		return ""
 	}
-
-	// 不支持的类型转换
-	if groupType == "relay" {
-		log.Printf("[Shadowrocket] relay类型不支持，跳过: %s", name)
-		return fmt.Sprintf("# relay类型不支持: %s", name)
+	switch groupType {
+	case "select", "url-test", "fallback", "load-balance", "random":
+	case "smart":
+		groupType = "url-test"
+	default:
+		groupType = "select"
 	}
 
-	// 获取代理列表
-	var proxies []string
-	if proxyList, ok := group["proxies"].([]interface{}); ok {
-		for _, p := range proxyList {
-			if pStr, ok := p.(string); ok {
-				proxies = append(proxies, pStr)
-			}
-		}
+	parts := []string{groupType}
+	parts = append(parts, members...)
+	if g.regex != "" {
+		parts = append(parts, "policy-regex-filter="+g.regex)
 	}
-
-	if len(proxies) == 0 {
+	if len(parts) == 1 {
 		return ""
 	}
-
-	// 构建基础配置
-	parts := []string{name, groupType}
-	parts = append(parts, proxies...)
 
 	// 添加测试参数（仅 url-test, fallback, load-balance）
 	if groupType == "url-test" || groupType == "fallback" || groupType == "load-balance" {
-		if url := GetString(group, "url"); url != "" {
+		if url := GetString(g.raw, "url"); url != "" {
 			parts = append(parts, fmt.Sprintf("url=%s", url))
 		} else {
 			parts = append(parts, "url=http://www.gstatic.com/generate_204")
 		}
 
-		if interval := GetInt(group, "interval"); interval > 0 {
+		if interval := GetInt(g.raw, "interval"); interval > 0 {
 			parts = append(parts, fmt.Sprintf("interval=%d", interval))
 		}
 
-		if timeout := GetInt(group, "timeout"); timeout > 0 {
-			parts = append(parts, fmt.Sprintf("timeout=%d", timeout))
-		} else {
-			parts = append(parts, "timeout=5")
+		// mihomo 的 timeout 是毫秒,Shadowrocket 是秒
+		timeout := GetInt(g.raw, "timeout")
+		if timeout >= 100 {
+			timeout /= 1000
 		}
+		if timeout <= 0 {
+			timeout = 5
+		}
+		parts = append(parts, fmt.Sprintf("timeout=%d", timeout))
 
-		if tolerance := GetInt(group, "tolerance"); tolerance > 0 {
+		if tolerance := GetInt(g.raw, "tolerance"); tolerance > 0 {
 			parts = append(parts, fmt.Sprintf("tolerance=%d", tolerance))
 		}
 	}
+	if GetBool(g.raw, "hidden") {
+		parts = append(parts, "hidden=1")
+	}
 
-	return strings.Join(parts, ",")
+	return g.name + " = " + strings.Join(parts, ",")
 }
 
 // generateRules 生成 [Rule] 部分。目标策略悬空(dangling)的规则改成 DIRECT。

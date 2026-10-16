@@ -13,6 +13,9 @@ import "strings"
 type policyGroupMembers struct {
 	Name    string
 	Members []string
+	// Empty 表示调用方已确定这个组没有任何成员(展开过 include-all 仍为空、或类型写不出来),
+	// 直接按「被删掉的组」处理并级联。
+	Empty bool
 }
 
 // policyPruneResult 是一次剔除的结果。
@@ -53,8 +56,11 @@ func prunePolicyGroups(groups []policyGroupMembers, inputNames []string, output 
 	}
 	for i, g := range groups {
 		res.Members[i] = g.Members
+		if g.Empty {
+			res.Removed[g.Name] = true
+		}
 	}
-	if len(res.dropped) == 0 {
+	if len(res.dropped) == 0 && len(res.Removed) == 0 {
 		return res
 	}
 
