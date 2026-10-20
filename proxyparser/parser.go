@@ -1773,6 +1773,14 @@ func parseMieruURL(uri string) (map[string]any, error) {
 	if v := queryParams["traffic-pattern"]; v != "" {
 		node["traffic-pattern"] = v
 	}
+	if v := queryParams["handshake-mode"]; v != "" {
+		node["handshake-mode"] = v
+	}
+	// mieru 本身支持 UDP over TCP,但 mihomo 要节点上显式写 udp: true 才会把 UDP 流量交给它
+	// (iluobei/miaomiaowu#130)。和 vmess / trojan 等协议一样默认打开;链接里明确写了
+	// udp=0 / udp=false 才关。官方简单链接没有这个参数,是社区写法。
+	udpParam := strings.ToLower(queryParams["udp"])
+	node["udp"] = udpParam != "0" && udpParam != "false"
 
 	return node, nil
 }

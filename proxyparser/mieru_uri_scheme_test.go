@@ -31,6 +31,8 @@ func TestParseMieruOfficialExportURI(t *testing.T) {
 		{"transport", "TCP", "官方链接里叫 protocol;不能把 handshake-mode 当传输方式"},
 		{"multiplexing", "MULTIPLEXING_OFF", ""},
 		{"mtu", 1400, ""},
+		{"handshake-mode", "HANDSHAKE_NO_WAIT", "mihomo 认这个字段,以前被丢掉(iluobei/miaomiaowu#130)"},
+		{"udp", true, "mihomo 要显式 udp: true 才代理 UDP,默认打开(iluobei/miaomiaowu#130)"},
 	} {
 		if got := node[tc.key]; got != tc.want {
 			t.Errorf("%s = %v(%T),期望 %v。%s", tc.key, got, got, tc.want, tc.why)
@@ -80,6 +82,26 @@ func TestMieruSimpleLinkRoundTrip(t *testing.T) {
 	} {
 		if node[k] != want {
 			t.Errorf("%s = %v, want %v(uri=%s)", k, node[k], want, uri)
+		}
+	}
+}
+
+// udp 默认打开;链接里明确写了 udp=0 / udp=false 才关(iluobei/miaomiaowu#130)。
+func TestParseMieruUDPFlag(t *testing.T) {
+	for uri, want := range map[string]bool{
+		"mieru://alice:s3cret@example.com:2999":                    true,
+		"mieru://alice:s3cret@example.com:2999?udp=true":           true,
+		"mieru://alice:s3cret@example.com:2999?udp=1":              true,
+		"mieru://alice:s3cret@example.com:2999?udp=0":              false,
+		"mierus://alice:s3cret@example.com?port=2999&udp=false":    false,
+		"mierus://alice:s3cret@example.com?port=2999&profile=home": true,
+	} {
+		node, err := Parse(uri)
+		if err != nil {
+			t.Fatalf("%s: %v", uri, err)
+		}
+		if node["udp"] != want {
+			t.Errorf("%s: udp = %v, want %v", uri, node["udp"], want)
 		}
 	}
 }
