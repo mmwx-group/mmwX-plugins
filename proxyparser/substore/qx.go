@@ -1,6 +1,7 @@
 package substore
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strings"
 )
@@ -630,7 +631,10 @@ func (p *QXProducer) appendTLSOptions(result *Result, proxy Proxy) {
 	if val := GetString(proxy, "tls-pubkey-sha256"); val != "" {
 		result.Append(fmt.Sprintf(",tls-pubkey-sha256=%s", val))
 	}
+	// tls-alpn:写了就原样用;否则把 alpn 编成 QX 的十六进制格式(每项「长度 + 内容」),上游 54481855
 	if val := GetString(proxy, "tls-alpn"); val != "" {
+		result.Append(fmt.Sprintf(",tls-alpn=%s", val))
+	} else if val := qxEncodeAlpn(proxy["alpn"]); val != "" {
 		result.Append(fmt.Sprintf(",tls-alpn=%s", val))
 	}
 
@@ -711,4 +715,29 @@ func qxFormatVmessMethod(security string) string {
 		}
 	}
 	return fallback
+}
+
+// qxEncodeAlpn alpn(列表或逗号分隔)编成 QX 的 tls-alpn:每项一个字节的长度(两位十六进制)+ 内容的十六进制。
+// 超过 255 字节的项没法表示,跳过。
+func qxEncodeAlpn(v interface{}) string {
+	var raw []string
+	switch x := v.(type) {
+	case []string:
+		raw = x
+	case []interface{}:
+		for _, item := range x {
+			raw = append(raw, fmt.Sprint(item))
+		}
+	case string:
+		raw = strings.Split(x, ",")
+	}
+	var b strings.Builder
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if item == "" || len(item) > 255 {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("%02x%s", len(item), hex.EncodeToString([]byte(item))))
+	}
+	return b.String()
 }

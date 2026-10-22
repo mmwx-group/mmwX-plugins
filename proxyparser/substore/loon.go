@@ -290,7 +290,8 @@ func (p *LoonProducer) trojan(proxy Proxy) (string, error) {
 		result.Append(",udp=true")
 	}
 
-	// alpn
+	// tls-profile / alpn
+	appendLoonTLSProfile(result, proxy)
 	appendLoonAlpn(result, proxy)
 
 	// ip-version
@@ -402,8 +403,13 @@ func (p *LoonProducer) vmess(proxy Proxy, _ bool) (string, error) {
 		result.Append(",udp=true")
 	}
 
+	// tls-profile / alpn:只在 TLS / REALITY 时输出(上游一致)
+	if GetBool(proxy, "tls") || IsPresent(proxy, "reality-opts") {
+		appendLoonTLSProfile(result, proxy)
+		appendLoonAlpn(result, proxy)
+	}
+
 	// ip-version
-	appendLoonAlpn(result, proxy)
 
 	p.appendIPVersion(result, proxy)
 
@@ -520,8 +526,13 @@ func (p *LoonProducer) vless(proxy Proxy, _ bool) (string, error) {
 		result.Append(",udp=true")
 	}
 
+	// tls-profile / alpn:只在 TLS / REALITY 时输出(上游一致)
+	if GetBool(proxy, "tls") || IsPresent(proxy, "reality-opts") {
+		appendLoonTLSProfile(result, proxy)
+		appendLoonAlpn(result, proxy)
+	}
+
 	// ip-version
-	appendLoonAlpn(result, proxy)
 
 	p.appendIPVersion(result, proxy)
 
@@ -551,6 +562,10 @@ func (p *LoonProducer) http(proxy Proxy) (string, error) {
 
 	// tls verification
 	result.AppendIfPresent(",skip-cert-verify=%v", "skip-cert-verify")
+	if GetBool(proxy, "tls") {
+		appendLoonTLSProfile(result, proxy)
+		appendLoonAlpn(result, proxy)
+	}
 
 	// tfo
 	result.AppendIfPresent(",tfo=%v", "tfo")
@@ -584,6 +599,10 @@ func (p *LoonProducer) socks5(proxy Proxy) (string, error) {
 
 	// tls verification
 	result.AppendIfPresent(",skip-cert-verify=%v", "skip-cert-verify")
+	if GetBool(proxy, "tls") {
+		appendLoonTLSProfile(result, proxy)
+		appendLoonAlpn(result, proxy)
+	}
 
 	// tfo
 	result.AppendIfPresent(",tfo=%v", "tfo")
@@ -788,7 +807,8 @@ func (p *LoonProducer) hysteria2(proxy Proxy) (string, error) {
 		result.Append(fmt.Sprintf(",hop-interval=%v", proxy["hop-interval"]))
 	}
 
-	// alpn
+	// tls-profile / alpn
+	appendLoonTLSProfile(result, proxy)
 	appendLoonAlpn(result, proxy)
 
 	// ip-version
@@ -815,6 +835,8 @@ func (p *LoonProducer) anytls(proxy Proxy) (string, error) {
 
 	// tls verification
 	result.AppendIfPresent(",skip-cert-verify=%v", "skip-cert-verify")
+	appendLoonTLSProfile(result, proxy)
+	appendLoonAlpn(result, proxy)
 
 	// sni
 	if sni := GetSNI(proxy); sni != "" {
@@ -842,9 +864,61 @@ func (p *LoonProducer) anytls(proxy Proxy) (string, error) {
 
 // Helper methods
 
+// appendLoonTLSProfile Loon 的 tls-profile(上游 Sub-Store 3078e159 / 07d94ef9 / e08f1b19):
+// 写了合法的 _loon_tls_profile 就用它;否则 REALITY 开了 mlkem 时按指纹取 safari-ios-26 / chrome147,
+// 再否则 chrome → chrome、safari / ios → safari-ios18;其余不输出。
+func appendLoonTLSProfile(result *Result, proxy Proxy) {
+	if v := loonTLSProfile(proxy); v != "" {
+		result.Append(",tls-profile=" + v)
+	}
+}
+
+func loonTLSProfile(proxy Proxy) string {
+	switch v := strings.TrimSpace(GetString(proxy, "_loon_tls_profile")); v {
+	case "global", "default", "safari-ios18", "safari-ios-26", "chrome", "chrome147":
+		return v
+	}
+	fingerprint := strings.TrimSpace(GetString(proxy, "client-fingerprint"))
+	if reality := GetMap(proxy, "reality-opts"); reality != nil && GetBool(reality, "support-x25519mlkem768") {
+		if fingerprint == "safari" || fingerprint == "ios" {
+			return "safari-ios-26"
+		}
+		return "chrome147"
+	}
+	switch fingerprint {
+	case "chrome":
+		return "chrome"
+	case "safari", "ios":
+		return "safari-ios18"
+	}
+	return ""
+}
+
+// loonAlpnList alpn 可以是列表或逗号分隔的字符串,去空白去空项
+func loonAlpnList(v interface{}) []string {
+	var raw []string
+	switch x := v.(type) {
+	case []string:
+		raw = x
+	case []interface{}:
+		for _, item := range x {
+			raw = append(raw, fmt.Sprint(item))
+		}
+	case string:
+		raw = strings.Split(x, ",")
+	}
+	var out []string
+	for _, item := range raw {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 // appendLoonAlpn 输出 alpn（数组逗号拼接 + 引号，对齐 Sub-Store：alpn="h2,http/1.1"）。
 func appendLoonAlpn(result *Result, proxy Proxy) {
-	if alpn := GetStringSlice(proxy, "alpn"); len(alpn) > 0 {
+	if alpn := loonAlpnList(proxy["alpn"]); len(alpn) > 0 {
 		result.Append(fmt.Sprintf(`,alpn="%s"`, strings.Join(alpn, ",")))
 	}
 }
@@ -894,6 +968,15 @@ func (p *LoonProducer) appendShadowTLS(result *Result, proxy Proxy) error {
 					result.Append(fmt.Sprintf(",shadow-tls-version=%d", version))
 				}
 
+				appendLoonTLSProfile(result, proxy)
+				// shadow-tls 的 alpn 优先取 plugin-opts 里的
+				alpn := loonAlpnList(pluginOpts["alpn"])
+				if len(alpn) == 0 {
+					alpn = loonAlpnList(proxy["alpn"])
+				}
+				if len(alpn) > 0 {
+					result.Append(fmt.Sprintf(`,alpn="%s"`, strings.Join(alpn, ",")))
+				}
 				result.AppendIfPresent(",udp-port=%d", "udp-port")
 			}
 		}

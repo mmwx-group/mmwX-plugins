@@ -173,6 +173,23 @@ func applyTlsSniFallback(node map[string]any, field string) {
 // parseVmessURL parses vmess:// URL and returns Clash format
 func parseVmessURL(uri string) (map[string]any, error) {
 	content := strings.TrimPrefix(uri, "vmess://")
+	// VLESS 风格的 vmess://uuid@host:port?...(Xray 的分享链接标准,REALITY / finalmask 只能这样写),
+	// 按 VLESS 解析后改回 VMess:encryption 是 VMess 的加密方式,alterId 固定 0,不带 flow(上游 5d7126e9)
+	if vlessStyleVmess.MatchString(content) {
+		node, err := parseVlessURL("vless://" + content)
+		if err != nil {
+			return nil, err
+		}
+		node["type"] = "vmess"
+		node["cipher"] = normalizeVmessSecurity(getString(node, "encryption", ""))
+		node["alterId"] = 0
+		delete(node, "encryption")
+		delete(node, "flow")
+		if name, _ := node["name"].(string); name == "VLESS Node" {
+			node["name"] = "VMess Node"
+		}
+		return node, nil
+	}
 	jsonStr, err := base64DecodeURLSafe(content)
 	if err != nil {
 		return nil, fmt.Errorf("decode vmess: %w", err)
@@ -402,6 +419,12 @@ func parseShadowsocksURL(uri string) (map[string]any, error) {
 		"cipher":   method,
 		"password": password,
 		"udp":      true,
+	}
+	// udp=0 / false / off 视为关闭,其余(含不写)都开 —— 与上游 Sub-Store 7b9d8227 一致
+	if queryParams != nil {
+		if v, ok := queryParams["udp"]; ok && isFalseFlag(v) {
+			node["udp"] = false
+		}
 	}
 
 	// Plugin
@@ -978,7 +1001,34 @@ func parseVlessURL(uri string) (map[string]any, error) {
 		node["headerType"] = headerType
 	}
 
+	// finalmask(fm=):JSON 对象就存对象,解析不了或不是对象就原样存字符串(上游 18dfe4c0)
+	if fm := queryParams["fm"]; fm != "" {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(fm), &obj); err == nil && obj != nil {
+			node["_finalmask"] = obj
+		} else {
+			node["_finalmask"] = fm
+		}
+	}
+
 	return node, nil
+}
+
+// vlessStyleVmess vmess:// 后面直接是 用户@主机 的写法(而不是 base64 JSON)
+var vlessStyleVmess = regexp.MustCompile(`^[^/?#]+@`)
+
+// normalizeVmessSecurity 对应上游 normalizeVmessSecurity(通用取值):
+// 去空白转小写,chacha20-ietf-poly1305 归一成 chacha20-poly1305,认不出的回落 auto
+func normalizeVmessSecurity(security string) string {
+	v := strings.ToLower(strings.TrimSpace(security))
+	if v == "chacha20-ietf-poly1305" {
+		v = "chacha20-poly1305"
+	}
+	switch v {
+	case "auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305":
+		return v
+	}
+	return "auto"
 }
 
 // parseHysteriaURL parses hysteria:// URL
@@ -2050,4 +2100,13 @@ func isIPv6(s string) bool {
 func isIP(s string) bool {
 	normalized := strings.TrimPrefix(strings.TrimSuffix(s, "]"), "[")
 	return isIPv4(normalized) || isIPv6(normalized)
+}
+
+// isFalseFlag URI 查询参数里表示「关」的写法:0 / false / off(不区分大小写)
+func isFalseFlag(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "off":
+		return true
+	}
+	return false
 }

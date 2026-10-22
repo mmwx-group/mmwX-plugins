@@ -375,6 +375,33 @@ func (p *URIProducer) ProduceOne(proxy Proxy) (string, error) {
 
 // encodeVMess encodes VMess proxy to vmess:// URI (matches frontend)
 func (p *URIProducer) encodeVMess(proxy Proxy) (string, error) {
+	// 带 REALITY 或 finalmask 的 VMess,V2RayN 的 base64 JSON 写法表达不了,改用 Xray 的查询参数写法
+	// vmess://uuid@host:port?...(与 VLESS 同一格式,encryption 写 VMess 的加密方式)。
+	// 这种写法没有 alterId,非 AEAD 的节点报错不输出(上游 5d7126e9 / 18dfe4c0)。
+	if GetMap(proxy, "reality-opts") != nil || firstWrittenValue(proxy["_finalmask"]) != nil {
+		aead, aeadSet := proxy["aead"].(bool)
+		if (aeadSet && !aead) || (!aeadSet && GetInt(proxy, "alterId") != 0) {
+			return "", fmt.Errorf("VMess query URI format cannot represent non-AEAD authentication (alterId must be 0)")
+		}
+		cp := Proxy{}
+		for k, v := range proxy {
+			cp[k] = v
+		}
+		if server := GetString(proxy, "server"); isIPv6(server) {
+			cp["server"] = "[" + server + "]"
+		}
+		if GetString(proxy, "network") == "" {
+			cp["network"] = "tcp"
+		}
+		cp["encryption"] = uriNormalizeVmessSecurity(GetString(proxy, "cipher"))
+		delete(cp, "flow")
+		uri, err := p.encodeVLESS(cp)
+		if err != nil {
+			return "", err
+		}
+		return "vmess://" + strings.TrimPrefix(uri, "vless://"), nil
+	}
+
 	// Handle network type conversion (frontend line 376-386)
 	network := GetString(proxy, "network")
 	net := network
@@ -603,6 +630,10 @@ func (p *URIProducer) encodeVLESS(proxy Proxy) (string, error) {
 	}
 	if extra := GetString(proxy, "_extra"); extra != "" {
 		params.Set("extra", extra)
+	}
+	// finalmask:字符串原样、对象序列化成 JSON(上游 18dfe4c0)
+	if fm := uriJSONValue(proxy["_finalmask"]); fm != "" {
+		params.Set("fm", fm)
 	}
 	if pqv := GetString(proxy, "_pqv"); pqv != "" {
 		params.Set("pqv", pqv)
@@ -837,7 +868,7 @@ func (p *URIProducer) encodeTrojan(proxy Proxy) (string, error) {
 //  1. 2022-blake3-* cipher 不做 base64, 而是 encodeURIComponent(cipher):encodeURIComponent(password)
 //  2. 补齐 transport(type/grpc/ws path+host)、fp、alpn、reality(security/pbk/sid/spx/mode/extra)、security=tls
 //  3. v2ray-plugin 同时输出 mode/host(兼容), 并补 path/tls/sni/skip-cert-verify/mux
-//  4. JS ss 不输出 udp 参数(此前 Go 多输出, 已移除)
+//  4. 总是输出 udp=1/0(上游 Sub-Store 7b9d8227 起)
 //
 // 注: 为与 JS encodeURIComponent 的编码一致(空格 %20 而非 +, 保留 ; 的转义),
 // 此处手动拼接 query 字符串, 不用 url.Values.Encode()(它会把空格编码为 + 并排序 key)。
@@ -908,12 +939,17 @@ func (p *URIProducer) encodeShadowsocks(proxy Proxy) (string, error) {
 		}
 	}
 
-	// uot / tfo (JS line 875-880); 注: JS ss 不输出 udp
+	// uot / tfo / udp (JS line 890-896);udp 总是输出 1 / 0
 	if GetBool(proxy, "udp-over-tcp") {
 		query.WriteString("&uot=1")
 	}
 	if GetBool(proxy, "tfo") {
 		query.WriteString("&tfo=1")
+	}
+	if GetBool(proxy, "udp") {
+		query.WriteString("&udp=1")
+	} else {
+		query.WriteString("&udp=0")
 	}
 
 	// transport (JS line 881-946)
@@ -1636,3 +1672,17 @@ func (p *URIProducer) encodeMieru(proxy Proxy) (string, error) {
 	userinfo := url.UserPassword(GetString(proxy, "username"), GetString(proxy, "password")).String()
 	return fmt.Sprintf("mierus://%s@%s?%s", userinfo, server, params.Encode()), nil
 }
+
+// uriJSONValue 对应上游 serializeUriJsonValue:字符串原样,JSON 对象序列化,其余为空
+func uriJSONValue(v interface{}) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case map[string]interface{}:
+		if b, err := json.Marshal(x); err == nil {
+			return string(b)
+		}
+	}
+	return ""
+}
+

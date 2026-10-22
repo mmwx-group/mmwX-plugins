@@ -103,3 +103,24 @@ func wireGuardAllowedIPs(v interface{}) []string {
 	}
 	return out
 }
+
+// firstWrittenValue 按 JS 的 a || b || … 取第一个「写了」的值:nil、空字符串、false 算没写;
+// 列表即使为空也算写了(与上游一致,空列表由调用方回落默认值)。
+func firstWrittenValue(values ...interface{}) interface{} {
+	for _, v := range values {
+		switch x := v.(type) {
+		case nil:
+			continue
+		case string:
+			if x == "" {
+				continue
+			}
+		case bool:
+			if !x {
+				continue
+			}
+		}
+		return v
+	}
+	return nil
+}

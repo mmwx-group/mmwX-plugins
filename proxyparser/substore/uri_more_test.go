@@ -264,8 +264,8 @@ func TestURIShadowsocks(t *testing.T) {
 	mustContain(t, uri, "alpn=h2")
 	// plugin obfs: encodeURIComponent("simple-obfs;obfs=http;obfs-host=bing.com")
 	mustContain(t, uri, "plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dbing.com")
-	// JS ss 不输出 udp 参数
-	mustNotContain(t, uri, "&udp=")
+	// 上游 7b9d8227 起总是输出 udp=1/0;这里没写 udp → 0
+	mustContain(t, uri, "&udp=0")
 	// 名称使用 encodeURIComponent (空格→%20)
 	mustContain(t, uri, "#ss%20node")
 }

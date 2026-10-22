@@ -1,11 +1,16 @@
 package substore
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/logger"
 )
 
 // SingboxProducer implements the Producer interface for sing-box format
@@ -159,6 +164,8 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 			}
 		case "naive":
 			parsed, err = p.naiveParser(proxy)
+		case "tailscale":
+			parsed = p.tailscaleParser(proxy)
 		default:
 			err = fmt.Errorf("platform sing-box does not support proxy type: %s", proxyType)
 		}
@@ -171,7 +178,7 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 		if parsed != nil {
 			// WG endpoint 不透传:它的字段集合和出站完全不同(见 singboxWireGuardEndpointKeys),
 			// 导入节点里认不出的参数一旦透传,官方 sing-box 会整份拒载。
-			if proxyType != "wireguard" {
+			if proxyType != "wireguard" && proxyType != "tailscale" {
 				p.passthroughExtraFields(proxy, parsed)
 			}
 			list = append(list, parsed)
@@ -688,7 +695,7 @@ func (p *SingboxProducer) grpcParser(proxy Proxy, parsed map[string]interface{})
 	parsed["transport"] = transport
 }
 
-func (p *SingboxProducer) tlsParser(proxy Proxy, parsed map[string]interface{}) {
+func (p *SingboxProducer) tlsParser(proxy Proxy, parsed map[string]interface{}) error {
 	// 对齐 Sub-Store: 在各 parser 预置的 parsedProxy.tls 上原地叠加, 而不是从零构造。
 	// trojan/naive/hysteria/hysteria2/tuic/anytls 天生走 TLS, 由各自 parser 预置
 	// enabled:true; 若在这里重置回 false, 末尾就写不回去, sni/reality/alpn 全丢。
@@ -727,16 +734,6 @@ func (p *SingboxProducer) tlsParser(proxy Proxy, parsed map[string]interface{}) 
 		tls["alpn"] = []string{alpnStr}
 	} else if alpnSlice := GetStringSlice(proxy, "alpn"); alpnSlice != nil {
 		tls["alpn"] = alpnSlice
-	}
-
-	if ca := GetString(proxy, "ca"); ca != "" {
-		tls["certificate_path"] = ca
-	}
-	if caStr := GetString(proxy, "ca_str"); caStr != "" {
-		tls["certificate"] = []string{caStr}
-	}
-	if caStr := GetString(proxy, "ca-str"); caStr != "" {
-		tls["certificate"] = []string{caStr}
 	}
 
 	realityOpts := GetMap(proxy, "reality-opts")
@@ -807,15 +804,6 @@ func (p *SingboxProducer) tlsParser(proxy Proxy, parsed map[string]interface{}) 
 	if GetBool(proxy, "_record_fragment") {
 		tls["record_fragment"] = true
 	}
-	if certificate := GetString(proxy, "_certificate"); certificate != "" {
-		tls["certificate"] = certificate
-	}
-	if certificate_path := GetString(proxy, "_certificate_path"); certificate_path != "" {
-		tls["certificate_path"] = certificate_path
-	}
-	if certificate_public_key_sha256 := GetString(proxy, "_certificate_public_key_sha256"); certificate_public_key_sha256 != "" {
-		tls["certificate_public_key_sha256"] = certificate_public_key_sha256
-	}
 	if client_certificate := GetString(proxy, "_client_certificate"); client_certificate != "" {
 		tls["client_certificate"] = client_certificate
 	}
@@ -832,9 +820,86 @@ func (p *SingboxProducer) tlsParser(proxy Proxy, parsed map[string]interface{}) 
 	// Only add tls if enabled (对齐 Sub-Store 的 delete parsedProxy.tls)
 	if enabled, _ := tls["enabled"].(bool); enabled {
 		parsed["tls"] = tls
-	} else {
-		delete(parsed, "tls")
+		return p.tlsCertificateParser(proxy, tls)
 	}
+	delete(parsed, "tls")
+	return nil
+}
+
+// tlsCertificateParser 证书 / 证书指纹 pin(上游 Sub-Store a3e61061):
+//   - ca / ca_str / ca-str / _certificate / _certificate_path 写证书;
+//   - REALITY 不认证书 pin,_certificate_sha256 / _certificate_public_key_sha256 忽略;
+//   - 没写 _certificate_sha256 时,fingerprint / tls-fingerprint(64 位十六进制,可带冒号)转成 base64 写进 certificate_sha256,
+//     格式不对就报错(该节点不输出);已有证书或公钥 pin 时不转;
+//   - 证书与 sha256 pin 同时存在时冲突,报错。
+//
+// 以前 sing-box 只认公钥 pin,指纹一律丢掉 —— 自签节点导出到 sing-box 就没有任何校验手段了。
+func (p *SingboxProducer) tlsCertificateParser(proxy Proxy, tls map[string]interface{}) error {
+	name := GetString(proxy, "name")
+	if ca := GetString(proxy, "ca"); ca != "" {
+		tls["certificate_path"] = ca
+	}
+	if caStr := GetString(proxy, "ca_str"); caStr != "" {
+		tls["certificate"] = []string{caStr}
+	}
+	if caStr := GetString(proxy, "ca-str"); caStr != "" {
+		tls["certificate"] = []string{caStr}
+	}
+	if v := firstWrittenValue(proxy["_certificate"]); v != nil {
+		tls["certificate"] = v
+	}
+	if v := GetString(proxy, "_certificate_path"); v != "" {
+		tls["certificate_path"] = v
+	}
+	if reality, _ := tls["reality"].(map[string]interface{}); reality != nil && GetBool(reality, "enabled") {
+		if listLen(proxy["_certificate_sha256"]) > 0 || listLen(proxy["_certificate_public_key_sha256"]) > 0 {
+			logger.Warn("[sing-box] Reality 不认 certificate_sha256 / certificate_public_key_sha256,已忽略", "proxy", name)
+		}
+		return nil
+	}
+	if v := firstWrittenValue(proxy["_certificate_public_key_sha256"]); v != nil {
+		tls["certificate_public_key_sha256"] = v
+	}
+	hasCertificate := listLen(tls["certificate"]) > 0 || GetString(tls, "certificate_path") != ""
+	if v, ok := proxy["_certificate_sha256"]; ok && v != nil {
+		tls["certificate_sha256"] = v
+	} else if fp := firstNonEmptyString(GetString(proxy, "fingerprint"), GetString(proxy, "tls-fingerprint")); fp != "" &&
+		!hasCertificate && listLen(tls["certificate_public_key_sha256"]) == 0 {
+		raw, err := hex.DecodeString(strings.ReplaceAll(strings.TrimSpace(fp), ":", ""))
+		if err != nil || len(raw) != sha256.Size {
+			return fmt.Errorf("platform sing-box: invalid SHA-256 certificate fingerprint for proxy %s", name)
+		}
+		tls["certificate_sha256"] = []string{base64.StdEncoding.EncodeToString(raw)}
+	}
+	if hasCertificate && (listLen(tls["certificate_sha256"]) > 0 || listLen(tls["certificate_public_key_sha256"]) > 0) {
+		return fmt.Errorf("platform sing-box: certificate_sha256 or certificate_public_key_sha256 conflicts with certificate or certificate_path for proxy %s", name)
+	}
+	return nil
+}
+
+// listLen 字符串算 1 个(空串 0),列表按元素数;其余 0 —— 对应 JS 的 x?.length 判断
+func listLen(v interface{}) int {
+	switch x := v.(type) {
+	case string:
+		if x == "" {
+			return 0
+		}
+		return 1
+	case []string:
+		return len(x)
+	case []interface{}:
+		return len(x)
+	}
+	return 0
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // Parser implementations
@@ -943,7 +1008,9 @@ func (p *SingboxProducer) httpParser(proxy Proxy) (map[string]interface{}, error
 
 	p.tfoParser(proxy, parsed)
 	p.detourParser(proxy, parsed)
-	p.tlsParser(proxy, parsed)
+	if err := p.tlsParser(proxy, parsed); err != nil {
+		return nil, err
+	}
 	p.ipVersionParser(proxy, parsed)
 	p.domainResolverParser(proxy, parsed)
 
@@ -1077,6 +1144,10 @@ func (p *SingboxProducer) shadowTLSOutbound(proxy Proxy, name string, port int) 
 			if v := GetString(proxy, "name-cert-verify"); v != "" {
 				stTLS["certificate_server_name"] = v
 			}
+		}
+		// 证书 / 指纹 pin 与主 TLS 同一套(上游 a3e61061)
+		if err := p.tlsCertificateParser(proxy, stTLS); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1330,7 +1401,9 @@ func (p *SingboxProducer) vmessParser(proxy Proxy) (map[string]interface{}, erro
 	p.networkParser(proxy, parsed)
 	p.tfoParser(proxy, parsed)
 	p.detourParser(proxy, parsed)
-	p.tlsParser(proxy, parsed)
+	if err := p.tlsParser(proxy, parsed); err != nil {
+		return nil, err
+	}
 	p.smuxParser(proxy, parsed)
 	p.ipVersionParser(proxy, parsed)
 	p.domainResolverParser(proxy, parsed)
@@ -1389,7 +1462,9 @@ func (p *SingboxProducer) vlessParser(proxy Proxy) (map[string]interface{}, erro
 	p.tfoParser(proxy, parsed)
 	p.detourParser(proxy, parsed)
 	p.smuxParser(proxy, parsed)
-	p.tlsParser(proxy, parsed)
+	if err := p.tlsParser(proxy, parsed); err != nil {
+		return nil, err
+	}
 	p.ipVersionParser(proxy, parsed)
 	p.domainResolverParser(proxy, parsed)
 
@@ -1430,7 +1505,9 @@ func (p *SingboxProducer) trojanParser(proxy Proxy) (map[string]interface{}, err
 	p.networkParser(proxy, parsed)
 	p.tfoParser(proxy, parsed)
 	p.detourParser(proxy, parsed)
-	p.tlsParser(proxy, parsed)
+	if err := p.tlsParser(proxy, parsed); err != nil {
+		return nil, err
+	}
 	p.smuxParser(proxy, parsed)
 	p.ipVersionParser(proxy, parsed)
 	p.domainResolverParser(proxy, parsed)
@@ -1543,7 +1620,9 @@ func (p *SingboxProducer) hysteriaParser(proxy Proxy) (map[string]interface{}, e
 	}
 
 	p.networkParser(proxy, parsed)
-	p.tlsParser(proxy, parsed)
+	if err := p.tlsParser(proxy, parsed); err != nil {
+		return nil, err
+	}
 	p.detourParser(proxy, parsed)
 	p.tfoParser(proxy, parsed)
 	p.smuxParser(proxy, parsed)
@@ -1626,7 +1705,9 @@ func (p *SingboxProducer) hysteria2Parser(proxy Proxy) (map[string]interface{}, 
 	}
 
 	p.networkParser(proxy, parsed)
-	p.tlsParser(proxy, parsed)
+	if err := p.tlsParser(proxy, parsed); err != nil {
+		return nil, err
+	}
 	p.tfoParser(proxy, parsed)
 	p.detourParser(proxy, parsed)
 	p.smuxParser(proxy, parsed)
@@ -1683,7 +1764,9 @@ func (p *SingboxProducer) tuic5Parser(proxy Proxy) (map[string]interface{}, erro
 	p.networkParser(proxy, parsed)
 	p.tfoParser(proxy, parsed)
 	p.detourParser(proxy, parsed)
-	p.tlsParser(proxy, parsed)
+	if err := p.tlsParser(proxy, parsed); err != nil {
+		return nil, err
+	}
 	p.smuxParser(proxy, parsed)
 	p.ipVersionParser(proxy, parsed)
 	p.domainResolverParser(proxy, parsed)
@@ -1742,7 +1825,9 @@ func (p *SingboxProducer) anytlsParser(proxy Proxy) (map[string]interface{}, err
 
 	p.networkParser(proxy, parsed)
 	p.detourParser(proxy, parsed)
-	p.tlsParser(proxy, parsed)
+	if err := p.tlsParser(proxy, parsed); err != nil {
+		return nil, err
+	}
 	p.ipVersionParser(proxy, parsed)
 	p.domainResolverParser(proxy, parsed)
 
@@ -1811,7 +1896,9 @@ func (p *SingboxProducer) naiveParser(proxy Proxy) (map[string]interface{}, erro
 
 	p.tfoParser(proxy, parsed)
 	p.detourParser(proxy, parsed)
-	p.tlsParser(proxy, parsed)
+	if err := p.tlsParser(proxy, parsed); err != nil {
+		return nil, err
+	}
 	p.smuxParser(proxy, parsed)
 	p.ipVersionParser(proxy, parsed)
 
@@ -1873,6 +1960,26 @@ func (p *SingboxProducer) wireguardParser(proxy Proxy) (map[string]interface{}, 
 		parsed["udp_fragment"] = true
 	}
 
+	// endpoint 专有字段(上游 104c9416):_name、_listen_port、_on_demand、_udp_nat_max、_udp_mapping、_udp_filtering
+	if v, ok := proxy["_name"].(string); ok {
+		parsed["name"] = v
+	}
+	if v, ok := safeUintField(proxy["_listen_port"]); ok && v <= 65535 {
+		parsed["listen_port"] = v
+	}
+	if v, ok := proxy["_on_demand"].(bool); ok {
+		parsed["on_demand"] = v
+	}
+	if v, ok := safeUintField(proxy["_udp_nat_max"]); ok && v <= 4294967295 {
+		parsed["udp_nat_max"] = v
+	}
+	for _, field := range []string{"udp_mapping", "udp_filtering"} {
+		switch v, _ := proxy["_"+field].(string); v {
+		case "endpoint_independent", "address_dependent", "address_and_port_dependent":
+			parsed[field] = v
+		}
+	}
+
 	// Handle reserved
 	parsedReserved := parseReserved(proxy["reserved"])
 	if parsedReserved != nil {
@@ -1918,15 +2025,11 @@ func (p *SingboxProducer) wireguardParser(proxy Proxy) (map[string]interface{}, 
 			preSharedKey = GetString(proxy, "pre-shared-key")
 		}
 
-		allowedIPs := GetStringSlice(peerMap, "allowed-ips")
-		if allowedIPs == nil {
-			allowedIPs = GetStringSlice(peerMap, "allowed_ips")
-		}
-		if allowedIPs == nil && singlePeer {
-			// 单 peer 写法(mihomo 顶层字段)的 allowed-ips 也在顶层,以前被忽略、一律回落默认值
-			allowedIPs = wireGuardAllowedIPs(proxy["allowed-ips"])
-		}
-		if allowedIPs == nil {
+		// allowed_ips:本 peer 的 allowed-ips / allowed_ips → 顶层同名字段 → 默认值(上游 Sub-Store 11baf128)。
+		// 多 peer 时没写的 peer 也继承顶层的;字符串按逗号拆开;取第一个写了的字段,写了空列表就回落默认值
+		allowedIPs := wireGuardAllowedIPs(firstWrittenValue(
+			peerMap["allowed-ips"], peerMap["allowed_ips"], proxy["allowed-ips"], proxy["allowed_ips"]))
+		if len(allowedIPs) == 0 {
 			allowedIPs = []string{"0.0.0.0/0"}
 			if GetString(proxy, "ipv6") != "" {
 				allowedIPs = append(allowedIPs, "::/0")
@@ -1994,7 +2097,7 @@ var singboxWireGuardEndpointKeys = map[string]bool{
 	// WireGuardEndpointOptions
 	"system": true, "name": true, "mtu": true, "address": true, "private_key": true,
 	"listen_port": true, "peers": true, "udp_timeout": true, "udp_mapping": true,
-	"udp_filtering": true, "udp_nat_max": true, "workers": true,
+	"udp_filtering": true, "udp_nat_max": true, "workers": true, "on_demand": true,
 	// DialerOptions
 	"detour": true, "bind_interface": true, "inet4_bind_address": true, "inet6_bind_address": true,
 	"bind_address_no_port": true, "protect_path": true, "routing_mark": true, "reuse_addr": true,
@@ -2087,4 +2190,122 @@ func (p *SingboxProducer) snellParser(proxy Proxy) (map[string]interface{}, erro
 	p.ipVersionParser(proxy, parsed)
 	p.domainResolverParser(proxy, parsed)
 	return parsed, nil
+}
+
+// safeUintField 对应上游 parseSafeIntegerValue:只认非负整数(数字或纯数字字符串),其余视为没写
+func safeUintField(v interface{}) (int64, bool) {
+	var str string
+	switch x := v.(type) {
+	case int:
+		str = strconv.Itoa(x)
+	case int64:
+		str = strconv.FormatInt(x, 10)
+	case float64:
+		if x != float64(int64(x)) {
+			return 0, false
+		}
+		str = strconv.FormatInt(int64(x), 10)
+	case string:
+		str = x
+	default:
+		return 0, false
+	}
+	if str == "" || strings.Trim(str, "0123456789") != "" {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(str, 10, 64)
+	if err != nil || n > 1<<53-1 {
+		return 0, false
+	}
+	return n, true
+}
+
+// tailscaleParser sing-box 的 Tailscale endpoint(上游 tailscaleParser / 104c9416)。
+// 设了 control-http-client(经指定的 HTTP 客户端连控制面)时,detour / 地址族 / domain_resolver 不再写在 endpoint 上。
+func (p *SingboxProducer) tailscaleParser(proxy Proxy) map[string]interface{} {
+	parsed := map[string]interface{}{
+		"tag":  GetString(proxy, "name"),
+		"type": "tailscale",
+	}
+	if v, ok := safeUintField(proxy["_listen_port"]); ok && v <= 65535 {
+		parsed["listen_port"] = v
+	}
+	if v, ok := proxy["_taildrop_directory"].(string); ok {
+		parsed["taildrop_directory"] = v
+	}
+	if v, ok := proxy["_on_demand"].(bool); ok {
+		parsed["on_demand"] = v
+	}
+	stateDir := firstWrittenValue(proxy["state-dir"], proxy["state-directory"])
+	for key, v := range map[string]interface{}{
+		"control_http_client":        proxy["control-http-client"],
+		"udp_timeout":                proxy["udp-timeout"],
+		"state_directory":            stateDir,
+		"auth_key":                   proxy["auth-key"],
+		"control_url":                proxy["control-url"],
+		"ephemeral":                  proxy["ephemeral"],
+		"hostname":                   proxy["hostname"],
+		"accept_routes":              proxy["accept-routes"],
+		"exit_node":                  proxy["exit-node"],
+		"exit_node_allow_lan_access": proxy["exit-node-allow-lan-access"],
+		"advertise_exit_node":        proxy["advertise-exit-node"],
+		"system_interface":           proxy["system-interface"],
+		"system_interface_name":      proxy["system-interface-name"],
+	} {
+		if v != nil {
+			parsed[key] = v
+		}
+	}
+	for key, src := range map[string]string{
+		"advertise_routes":              "advertise-routes",
+		"advertise_tags":                "advertise-tags",
+		"relay_server_static_endpoints": "relay-server-static-endpoints",
+	} {
+		if list, ok := proxy[src].([]interface{}); ok {
+			parsed[key] = list
+		} else if list, ok := proxy[src].([]string); ok {
+			parsed[key] = list
+		}
+	}
+	for key, src := range map[string]string{"system_interface_mtu": "system-interface-mtu", "relay_server_port": "relay-server-port"} {
+		if v, ok := safeUintField(proxy[src]); ok {
+			parsed[key] = v
+		}
+	}
+	if !tailscaleHasControlHTTPClient(proxy["control-http-client"]) {
+		p.detourParser(proxy, parsed)
+		p.ipVersionParser(proxy, parsed)
+		p.domainResolverParser(proxy, parsed)
+	}
+	switch ssh := proxy["ssh-server"].(type) {
+	case map[string]interface{}:
+		server := map[string]interface{}{"enabled": ssh["enabled"] != false}
+		for key, src := range map[string]string{"disable_pty": "disable-pty", "disable_sftp": "disable-sftp", "disable_forwarding": "disable-forwarding"} {
+			if v, ok := ssh[src]; ok && v != nil {
+				server[key] = v
+			}
+		}
+		parsed["ssh_server"] = server
+	case nil:
+	default:
+		if firstWrittenValue(ssh) != nil {
+			parsed["ssh_server"] = true
+		}
+	}
+	return parsed
+}
+
+// tailscaleHasControlHTTPClient 对应上游 hasControlHTTPClient:非空字符串,或至少有一个非空值的对象
+func tailscaleHasControlHTTPClient(v interface{}) bool {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x) != ""
+	case map[string]interface{}:
+		for _, item := range x {
+			if item != nil && item != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
