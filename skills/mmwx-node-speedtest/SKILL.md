@@ -10,9 +10,9 @@ description: 对妙妙屋X的节点批量测速并出对比报告。当用户说
 ## 步骤
 
 1. **取节点**:`node_list` 列出节点及 ID;与用户确认测哪些(全部 / 某服务器 / 指定几个)。
-2. **(可选)选测速来源**:测速默认走主控本机;若用户有家用测速端,可在 `node_speedtest` 传 `tester_id`。
+2. **(可选)选测速来源**:测速默认走主控本机;`speedtest_testers` 列出已登记的测速端(如家宽测速端),要从那里测就在 `node_speedtest` 传 `tester_id`。
 3. **逐个发起**:对每个目标节点调 `node_speedtest`,参数 `node_id`(可带 `tester_id`)。测速是**异步**的:工具立即返回,结果稍后落库。
-4. **等待并取结果**:测速在服务端串行执行,等待若干秒后,经只读结果接口(`GET /api/admin/speedtest/results?latest=1`)或节点详情读取每个节点最近一次的 `down_mbps / latency_ms / status`。
+4. **等待并取结果**:测速在服务端串行执行,等待若干秒后用 `node_speedtest_results` 读每个节点最近一次的 `down_mbps / latency_ms / status`;还没出结果的过一会儿再查。
 5. **出报告**:按下行速度排序,列出 速度 / 延迟 / 来源 / 时间;标注失败的节点(status=failed)及原因。
 
 ## 注意

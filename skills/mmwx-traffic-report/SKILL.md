@@ -12,7 +12,7 @@ description: 对妙妙屋X做流量巡检并出报告——总体用量、各用
 1. **总体概览**:`traffic_summary` 取跨服务器聚合用量(已用/限额等)。
 2. **用户维度**:`user_list` 取全部用户及其套餐/配额;对关注的用户用 `traffic_user_detail`(传 username)拿明细。
 3. **服务器维度**:`server_list` 看各服务器状态;单台明细用 `traffic_server_detail`(传 `server_id`)按 inbound tag / 出站 tag 拆分,定位"谁/哪个入站占了多少"。
-4. **(可选)历史曲线**:`traffic_snapshots`(可传 `server_id`、`hours`)看历史流量曲线,用于检测突发流量或异常时段。
+4. **(可选)历史曲线**:`traffic_snapshots`(可传 `server_id`、`days`)看历史流量曲线,用于检测突发流量或异常时段。
 5. **转发维度**:走转发链的流量是单独一份账。`forward_status` 看有哪些转发规则在跑,`forward_metrics`(`server_id` + `rule_id`)看单条规则的流量曲线。用户侧这笔账挂在合成 email `{用户名}__fwd-c{链}-p{端口}` 上,算总量时别漏。
 6. **采集健康度**:出报告前先 `task_runs`(`task=traffic_collector`)确认采集任务在正常跑。采集挂了会让所有数字看起来"没涨",别把它当成用户没用量。
 7. **汇总成报告**,建议包含:

@@ -22,7 +22,7 @@ description: 在妙妙屋X里搭建与运维转发链——建转发组/链、�
    - 要做 DNS 负载均衡再给 `dns_domain` + `dns_provider_id`;只作中间/出口跳的组留空即可。
 3. **建链**:`forward_chain_create`,`name` + `group_ids`(**按跳顺序,入口在前**),并给 `port_range_start` / `port_range_end` 划定入口端口区间。
 4. **绑节点**:
-   - 已有节点走这条链:`forward_chain_bind_node`(`chain_id` + `node_id`,`port` 留空让主控在区间内自动分配)。
+   - 已有节点走这条链:`forward_chain_bind_node`(`chain_id` + `node_id`,`port` 不填时工具会先向主控要一个链端口区间里空闲的端口)。
    - 想直接生成一个可加进订阅的入口节点:`forward_chain_create_node`,给 `existing_node_id` 表示中继到已有节点(会用**该用户自己的**凭据),不给则由出口组自建站。
 5. **下发**:`forward_chain_apply`(`chain_id`)。**不做这一步,前面所有改动都不会生效。**
 6. **核对**:`forward_status` 看规则是否下发成功、监听是否起来。
@@ -30,7 +30,7 @@ description: 在妙妙屋X里搭建与运维转发链——建转发组/链、�
 ## B. 限速与配额
 
 1. 单条绑定的限制:`forward_chain_set_limit`(`chain_id` + `node_id` + `rate_mbps` / `conn_limit` / `ip_limit`,0 表示不限)。
-2. 改完同样要 `forward_chain_apply` 才生效。
+2. 保存后主控会自动重新下发这条链,不用再 `forward_chain_apply`。
 3. 套餐维度的转发配额(能建几条、限速多少)在套餐里配,不在这套工具里改。
 
 ## C. 排障
@@ -43,7 +43,7 @@ description: 在妙妙屋X里搭建与运维转发链——建转发组/链、�
 
 ### 常见坑
 
-- **改了不下发**:改组成员、改跳序、改限额之后没 `forward_chain_apply`,是转发类问题最常见的原因。
+- **改了不下发**:改组成员、改跳序之后没 `forward_chain_apply`,是转发类问题最常见的原因(单条绑定的限额例外,保存即下发)。
 - **端口被占**:入口端口分配走链的端口区间;区间太窄或被别的进程占了会建不出来。让主控自动分配,别手工指定。
 - **删组删不掉**:被链引用的组必须先改链的跳(`forward_chain_set_hops`)才能删。
 - **单组链**:只有入口组是合法的,不要为了凑两跳去建一个空的出口组。

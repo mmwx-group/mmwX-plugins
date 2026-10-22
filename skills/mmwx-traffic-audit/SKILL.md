@@ -38,4 +38,4 @@ description: 在妙妙屋X里核对流量账——某个用户的流量为什么
 
 - 写明口径:日期范围(或套餐周期)、是原始量还是计费量。
 - 有 `incomplete_dates` 就照实说哪几天数据不全。
-- 处理建议只给出、不代为执行:限速用 `user_set_limits`,改流量上限用 `user_set_traffic_limit`,续期用 `user_extend`,都要用户同意后再做。
+- 处理建议只给出、不代为执行:限速用 `user_set_limits`,改流量上限用 `user_set_traffic_limit`,续期用 `user_extend`,清零本周期流量用 `user_reset_traffic`;确认共享后作废旧凭据 / 链接见 `mmwx-account-recovery`。都要用户同意后再做。

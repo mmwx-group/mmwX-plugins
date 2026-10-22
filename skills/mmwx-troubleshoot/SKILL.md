@@ -32,26 +32,27 @@ description: 排查妙妙屋X的常见故障——节点离线、服务器掉线
 2. `forward_chain_list` / `forward_chain_get`(`chain_id`)看链的跳序与结构问题列表;`forward_group_list` 看每一跳的组里有哪些服务器。
 3. `forward_chain_connections`(`chain_id`)看实时连接——「连不上」要区分是没连上还是连接数打满了。
 4. `forward_metrics`(`server_id` + `rule_id`,rule_id 从 `forward_status` 里取)看这条规则的历史流量与延迟曲线。
-5. 改完组成员/跳序/限额,必须 `forward_chain_apply`(`chain_id`)才会真正下发生效——只改不下发是转发类问题的高频原因。
+5. 改完组成员 / 跳序,必须 `forward_chain_apply`(`chain_id`)才会真正下发生效——只改不下发是转发类问题的高频原因。
 
 ## B4. 证书层面
 1. `cert_list` 看目标域名的证书是否过期、自动续期与自动部署是否开着。TLS 类入站在证书过期后会直接连不上。
 2. 确认过期后:`cert_renew`(`id`)续期,再 `cert_deploy`(`id`)部署到 nginx/xray;两者都做完才生效。
 
 ## C. 用户层面
-1. `user_detail`(传 username)看其状态(是否被禁用)、套餐、配额。
-2. `package_assignment_list`(传 username)看**多套餐实例**分配(现在的主路径):到期时间、流量覆盖、是否 active。只看 `user_detail` 会漏掉走套餐实例绑定的那些。
+1. `user_detail`(传 username)看其状态(是否被禁用)、限额覆盖、订阅短码。
+2. `package_assignment_list`(传 username)看**多套餐实例**分配(现在的主路径):到期时间、流量覆盖、是否 active。
 3. `traffic_user_detail`(传 username)看是否已超额(超额会被限速/阻断)。
-4. **订阅排查**:`subscribe_file_list` 看该用户是否有可用订阅文件,缺则 `subscribe_file_create`。
-5. 结论可能是:用户被禁用(可 `user_set_status` 启用)、超额(可 `user_set_limits` 或换套餐)、未绑定套餐(`package_assign`)、订阅文件缺失(`subscribe_file_create`)。这些写操作**先和用户确认再做**。
+4. **订阅排查**:`user_subscription_links`(传 username)拿到他应该用的链接,和用户手里那条对比 —— 短码不一样说明他用的是旧链接(凭据或短码被换过)。`links` 为空 = 没绑套餐。
+5. **登不进面板**:`security_login_locks` 看账号或 IP 是否被锁;`security_ban_list` 看 IP 是否被封。处理见 `mmwx-account-recovery`。
+6. 结论可能是:用户被禁用(可 `user_set_status` 启用)、超额(`user_reset_traffic` 清零本周期 / `user_set_traffic_limit` 提额 / 换套餐)、未绑定套餐(`package_assignment_upsert`)、用着旧链接(把 `user_subscription_links` 的新链接发给他)、被锁 / 被封(`security_login_unlock` / `security_unban_ip`)。这些写操作**先和用户确认再做**。
 
 ## D. 模板/规则配置层面
-1. **预览订阅**:若用户报订阅内容异常,用 `template_v3_analyze`(传 subscription_url)分析节点分布,或 `template_v3_preview`(传模板内容 + 节点)直接渲染对比。
+1. **预览订阅**:若用户报订阅内容异常,用 `template_v3_preview_with_tags`(`template_filename` + 可选 `selected_tags`)按面板里的节点渲染这份模板;`template_v3_analyze`(`subscription_filename` 或直接贴 `subscription_content`)看一份订阅的地区 / 标签分布;改模板前用 `template_v3_preview`(模板内容 + 节点)试渲染。
 2. `custom_rule_list` 看自定义分流是否影响了用户走向(命中 DIRECT 错路等)。
 
 ## 注意
 - 先诊断、后动手;每个写操作前说明你将做什么。
 - 高危操作(重启服务、删用户等)需 `confirm: true`。
-- 卸载/重置类操作不开放,遇到需要这类处理的情况,给人工指引。
+- 卸载 xray / nginx、重置 agent 令牌等操作不开放,遇到需要这类处理的情况,给人工指引。
 - `server_xray_config_get` 拉取的是远程服务器的实际生效配置(诊断金标准),与"主控记录的应有配置"比对可发现飘移。
 - 路由确实需要改时用 `server_routing_update`(`action=set|add_rule|remove_rule`,**高危需 confirm:true**)。删规则优先用 `marktag` 或 `outbound_tag` 定位,**别只给 index** —— 规则顺序会漂,按下标删很容易删错一条。
