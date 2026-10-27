@@ -128,7 +128,7 @@ func (p *SurgeProducer) ProduceOne(proxy Proxy, outputType string, opts *Produce
 	case "wireguard-surge":
 		return p.wireguardSurge(proxy)
 	case "hysteria2":
-		return p.hysteria2(proxy, includeUnsupported)
+		return p.hysteria2(proxy)
 	case "ssh":
 		return p.ssh(proxy)
 	case "trusttunnel":
@@ -601,20 +601,17 @@ func (p *SurgeProducer) wireguardSurge(proxy Proxy) (string, error) {
 	return result.String(), nil
 }
 
-func (p *SurgeProducer) hysteria2(proxy Proxy, includeUnsupported bool) (string, error) {
+func (p *SurgeProducer) hysteria2(proxy Proxy) (string, error) {
 	// obfs:Surge 现在两种都收(上游 9405ac6f 加的 gecko),字段名各不相同。
+	// 不再看 IncludeUnsupportedProxy:上游 f143710e(2026-03-28)起默认输出客户端支持的全部写法,
+	// 这里漏跟,还留着「没开 include-unsupported 就拒掉一切 obfs」—— 主控从不设这个选项,
+	// 带 salamander 的 HY2 节点因此从 Surge 订阅里整个消失(iluobei/miaomiaowuX#1445)。
 	obfsPasswordField := map[string]string{
 		"salamander": "salamander-password",
 		"gecko":      "gecko-password",
 	}[GetString(proxy, "obfs")]
-	if includeUnsupported {
-		if IsPresent(proxy, "obfs-password") && obfsPasswordField == "" {
-			return "", fmt.Errorf("only salamander and gecko obfs are supported")
-		}
-	} else {
-		if IsPresent(proxy, "obfs") || IsPresent(proxy, "obfs-password") {
-			return "", fmt.Errorf("obfs is unsupported")
-		}
+	if IsPresent(proxy, "obfs-password") && obfsPasswordField == "" {
+		return "", fmt.Errorf("only salamander and gecko obfs are supported")
 	}
 
 	result := &Result{Proxy: proxy}

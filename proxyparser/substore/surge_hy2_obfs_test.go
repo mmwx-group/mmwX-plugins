@@ -27,6 +27,36 @@ func TestSurgeHysteria2SupportsGeckoAndSalamander(t *testing.T) {
 	}
 }
 
+// #1445:主控生成订阅时从不设 IncludeUnsupportedProxy。以前这种默认选项下
+// 带 salamander / gecko 的 HY2 节点被判成「obfs is unsupported」整个丢掉,
+// Surge / Surge Mac 订阅里就没有这个节点。
+func TestSurgeHysteria2ObfsWithDefaultOptions(t *testing.T) {
+	hy2 := func() Proxy {
+		return Proxy{
+			"name": "hy2-salamander", "type": "hysteria2", "server": "1.2.3.4", "port": 443,
+			"password": "pw", "obfs": "salamander", "obfs-password": "obfspw", "sni": "a.example.com",
+		}
+	}
+	line, err := NewSurgeProducer().ProduceOne(hy2(), "", &ProduceOptions{})
+	if err != nil {
+		t.Fatalf("默认选项下 salamander 不该被拒: %v", err)
+	}
+	if !strings.Contains(line, `salamander-password="obfspw"`) {
+		t.Fatalf("应输出 salamander-password,实际: %s", line)
+	}
+
+	for name, producer := range map[string]Producer{"surge": NewSurgeProducer(), "surgemac": NewSurgeMacProducer()} {
+		out, err := producer.Produce([]Proxy{hy2()}, "", &ProduceOptions{})
+		if err != nil {
+			t.Fatalf("%s Produce 出错: %v", name, err)
+		}
+		if got, _ := out.(string); !strings.Contains(got, `hy2-salamander=hysteria2,1.2.3.4,443`) ||
+			!strings.Contains(got, `salamander-password="obfspw"`) {
+			t.Fatalf("%s 订阅里应保留 salamander 节点,实际: %q", name, got)
+		}
+	}
+}
+
 // 认不出的混淆仍要报错。
 func TestSurgeHysteria2RejectsUnknownObfs(t *testing.T) {
 	_, err := NewSurgeProducer().ProduceOne(Proxy{
