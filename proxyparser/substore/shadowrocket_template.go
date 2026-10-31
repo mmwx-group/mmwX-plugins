@@ -305,6 +305,11 @@ func (p *ShadowrocketTemplateProducer) formatProxyLine(proxy Proxy) (string, str
 		addUDP()
 
 	case "vless":
+		// VLESS Encryption(encryption 非 none)的密钥 Shadowrocket 配置文件没有对应参数:
+		// 照写一行会把密钥丢掉,节点连不上还看不出原因 —— 跳过并留注释(同 Loon / QX)。
+		if enc := GetString(proxy, "encryption"); enc != "" && enc != "none" {
+			return "", "不支持 VLESS encryption"
+		}
 		add("password", GetString(proxy, "uuid"))
 		srConfTLS(proxy, &params, GetBool(proxy, "tls"))
 		switch flow := GetString(proxy, "flow"); flow {

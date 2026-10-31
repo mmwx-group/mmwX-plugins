@@ -101,7 +101,7 @@ func TestShadowrocketConfProxyLines(t *testing.T) {
 	}
 }
 
-// 写不出来的节点留注释、不进组:Snell + ShadowTLS、多 peer WireGuard、缺端口的节点。
+// 写不出来的节点留注释、不进组:Snell + ShadowTLS、多 peer WireGuard、缺端口的节点、VLESS Encryption。
 func TestShadowrocketConfSkipsWithComment(t *testing.T) {
 	out := srConfProduce(t, []Proxy{
 		{"name": "stls", "type": "snell", "server": "a.com", "port": 443, "psk": "k", "version": 5,
@@ -109,11 +109,13 @@ func TestShadowrocketConfSkipsWithComment(t *testing.T) {
 		{"name": "wgm", "type": "wireguard", "server": "a.com", "port": 51820, "private-key": "PK",
 			"peers": []interface{}{map[string]interface{}{}, map[string]interface{}{}}},
 		{"name": "noport", "type": "trojan", "server": "a.com", "password": "p"},
+		{"name": "venc", "type": "vless", "server": "a.com", "port": 443, "uuid": "id",
+			"encryption": "mlkem768x25519plus.native.0rtt.PUBKEY"},
 	}, map[string]interface{}{})
 	if got := confSection(out, "[Proxy]"); len(got) != 0 {
 		t.Errorf("不应输出节点: %q", got)
 	}
-	for _, name := range []string{"stls", "wgm", "noport"} {
+	for _, name := range []string{"stls", "wgm", "noport", "venc"} {
 		if !strings.Contains(out, ": "+name+"(") {
 			t.Errorf("%s 应留注释:\n%s", name, out)
 		}
