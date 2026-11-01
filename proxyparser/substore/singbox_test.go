@@ -192,3 +192,28 @@ func TestSingboxProducePassthroughIntegration(t *testing.T) {
 		}
 	}
 }
+
+// sing-box 1.15 用户实报:decode config: outbounds[8].headerType: unknown field。
+// 分享链接解析存下的 xray 参数(headerType)、内部字段(_ 开头)、协议专属项都不能被兜底透传出去。
+func TestPassthroughSkipsNonSingboxKeys(t *testing.T) {
+	p := NewSingboxProducer()
+	proxy := Proxy{
+		"name": "n", "type": "vless", "server": "example.com", "port": 443,
+		"headerType": "none", "_finalmask": map[string]any{"x": 1}, "tls-fingerprint": "ab:cd",
+		"xhttp-opts": map[string]any{"path": "/x"}, "mode": "auto", "security": "auto",
+		"transport": "TCP", "multiplexing": "MULTIPLEXING_LOW", "port-range": "1000-2000",
+		"traffic-pattern": "x", "handshake-mode": "y", "someCamelKey": 1,
+		"interface-name": "eth0",
+	}
+	parsed := map[string]interface{}{"tag": "n", "type": "vless", "server": "example.com", "server_port": 443}
+	p.passthroughExtraFields(proxy, parsed)
+	for _, k := range []string{"headerType", "_finalmask", "finalmask", "tls_fingerprint", "xhttp_opts",
+		"mode", "security", "transport", "multiplexing", "port_range", "traffic_pattern", "handshake_mode", "someCamelKey"} {
+		if _, ok := parsed[k]; ok {
+			t.Errorf("%q 不是 sing-box 字段,不应被透传: %v", k, parsed[k])
+		}
+	}
+	if parsed["interface_name"] != "eth0" {
+		t.Errorf("正常的 kebab-case 自定义字段仍应透传为 snake_case,得到 %v", parsed["interface_name"])
+	}
+}

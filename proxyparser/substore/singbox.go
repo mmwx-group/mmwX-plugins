@@ -318,11 +318,28 @@ var singboxConsumedKeys = map[string]bool{
 	"ws-headers": true, "ws-path": true, "ws-host": true,
 	"http-host": true, "http-path": true, "h2-host": true, "h2-path": true,
 	"obfs-host": true,
+
+	// 解析分享链接时存下的非 Clash 标准字段,sing-box 出站里没有对应项(用户实报 sing-box 1.15:
+	// decode config: outbounds[N].headerType: unknown field)。tls-fingerprint 由 tlsCertificateParser
+	// 换成 certificate_sha256;其余是 xhttp / anytls / mieru 等 sing-box 不支持或另行处理的协议专属项。
+	"headerType": true, "tls-fingerprint": true, "xhttp-opts": true, "mode": true,
+	"security": true, "transport": true, "multiplexing": true, "port-range": true,
+	"traffic-pattern": true, "handshake-mode": true,
+}
+
+// singboxPassthroughable 兜底透传只放 sing-box 风格的字段:sing-box 字段一律小写 snake_case(Clash 写成
+// kebab-case),带大写字母的(headerType / alterId 这类 xray 链接参数)和下划线开头的内部字段都不是
+// sing-box 字段 —— 透传出去官方 sing-box 会以 unknown field 拒绝整份配置。
+func singboxPassthroughable(key string) bool {
+	if key == "" || strings.HasPrefix(key, "_") {
+		return false
+	}
+	return strings.ToLower(key) == key
 }
 
 func (p *SingboxProducer) passthroughExtraFields(proxy Proxy, parsed map[string]interface{}) {
 	for key, value := range proxy {
-		if singboxConsumedKeys[key] {
+		if singboxConsumedKeys[key] || !singboxPassthroughable(key) {
 			continue
 		}
 		sbKey := strings.ReplaceAll(key, "-", "_")
