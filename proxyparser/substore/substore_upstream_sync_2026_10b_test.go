@@ -70,6 +70,7 @@ func TestSingboxWireGuardAllowedIPsFallback(t *testing.T) {
 // 格式不对报错;REALITY 忽略;证书与 sha256 pin 同时存在报冲突
 func TestSingboxCertificateSHA256(t *testing.T) {
 	p := NewSingboxProducer()
+	p.certSHA256 = true // 客户端 sing-box >= 1.15
 	const hexFP = "d6b4b1a0c6f1a8d3e2b5c4a7f9e8d1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a6978f"
 	trojan := func(extra Proxy) Proxy {
 		pr := Proxy{"name": "t", "type": "trojan", "server": "a.com", "port": 443, "password": "x", "sni": "a.com"}
@@ -124,7 +125,7 @@ func TestSingboxCertificateSHA256(t *testing.T) {
 	}
 
 	// 生产整份配置时,指纹不对的节点被跳过,不影响其余节点
-	res, err := p.Produce([]Proxy{trojan(Proxy{"name": "bad", "fingerprint": "zz"}), trojan(Proxy{"name": "good"})}, "internal", &ProduceOptions{})
+	res, err := p.Produce([]Proxy{trojan(Proxy{"name": "bad", "fingerprint": "zz"}), trojan(Proxy{"name": "good"})}, "internal", &ProduceOptions{SingBoxVersion: "1.15.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,5 +287,51 @@ func TestSingboxTailscaleEndpoint(t *testing.T) {
 	}
 	if strings.Contains(out, `"detour"`) {
 		t.Fatalf("设了 control-http-client 时不写 detour:\n%s", out)
+	}
+}
+
+// certificate_sha256 是 sing-box 1.15.0 才有的字段:版本未知 / 低于 1.15 时不写,指纹 pin 丢掉(老客户端见到未知字段整份配置加载失败);
+// 1.15+ 照写。
+func TestSingboxCertificateSHA256VersionGate(t *testing.T) {
+	const hexFP = "d6b4b1a0c6f1a8d3e2b5c4a7f9e8d1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a6978f"
+	node := func(extra Proxy) Proxy {
+		pr := Proxy{"name": "t", "type": "trojan", "server": "a.com", "port": 443, "password": "x", "sni": "a.com", "fingerprint": hexFP}
+		for k, v := range extra {
+			pr[k] = v
+		}
+		return pr
+	}
+	tlsOf := func(version string, pr Proxy) map[string]interface{} {
+		t.Helper()
+		res, err := NewSingboxProducer().Produce([]Proxy{pr}, "internal", &ProduceOptions{SingBoxVersion: version})
+		if err != nil {
+			t.Fatal(err)
+		}
+		list := res.([]map[string]interface{})
+		if len(list) != 1 {
+			t.Fatalf("version %q: 节点不该被丢: %v", version, list)
+		}
+		return list[0]["tls"].(map[string]interface{})
+	}
+	for _, v := range []string{"", "1.12.4", "1.14.9", "garbage"} {
+		if got := tlsOf(v, node(nil)); got["certificate_sha256"] != nil {
+			t.Fatalf("version %q 不该写 certificate_sha256: %v", v, got)
+		}
+		if got := tlsOf(v, node(Proxy{"_certificate_sha256": []interface{}{"x"}})); got["certificate_sha256"] != nil {
+			t.Fatalf("version %q 显式 _certificate_sha256 也不该写: %v", v, got)
+		}
+		// 老版本下指纹格式不对也只是丢掉,不让整个节点消失
+		if got := tlsOf(v, node(Proxy{"fingerprint": "zz"})); got["certificate_sha256"] != nil {
+			t.Fatalf("version %q: %v", v, got)
+		}
+	}
+	for _, v := range []string{"1.15.0", "v1.15.0-alpha.3", "1.16.1", "2.0.0"} {
+		if got := tlsOf(v, node(nil)); got["certificate_sha256"] == nil {
+			t.Fatalf("version %q 应写 certificate_sha256", v)
+		}
+	}
+	// 公钥 pin(1.13+)不受这个开关影响
+	if got := tlsOf("1.13.0", node(Proxy{"_certificate_public_key_sha256": []interface{}{"pk"}})); got["certificate_public_key_sha256"] == nil {
+		t.Fatal("certificate_public_key_sha256 应照写")
 	}
 }

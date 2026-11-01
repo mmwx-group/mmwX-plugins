@@ -14,6 +14,10 @@ type ProduceOptions struct {
 	Nameserver              []string
 	// FullConfig contains the complete original config for producers that need to output full config (e.g., Stash)
 	FullConfig map[string]interface{}
+	// SingBoxVersion 客户端的 sing-box 版本(如 "1.12.4"、"1.15.0-alpha.2"),一般从 UA 里取;空 = 不知道。
+	// tls.certificate_sha256 只有 sing-box 1.15.0 起才认,更老的版本见到这个字段整份配置都加载失败,
+	// 所以只有确知 >= 1.15 才写。
+	SingBoxVersion string
 }
 
 // Producer is the interface for all proxy format producers

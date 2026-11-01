@@ -21,6 +21,8 @@ type SingboxProducer struct {
 	// sing-box 有一批字段只有非官方版认(client_name / quic_proxy_mode / certificate_server_name),
 	// 上游把它们挂在这个开关后面,官方版才不会收到不认识的字段。
 	includeUnsupported bool
+	// certSHA256 本次 Produce 的客户端认不认 tls.certificate_sha256(sing-box 1.15.0+),见 ProduceOptions.SingBoxVersion
+	certSHA256 bool
 }
 
 // NewSingboxProducer creates a new sing-box producer
@@ -54,6 +56,7 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 		opts = &ProduceOptions{}
 	}
 	p.includeUnsupported = opts.IncludeUnsupportedProxy
+	p.certSHA256 = singboxVersionAtLeast(opts.SingBoxVersion, 1, 15)
 
 	// First, convert proxies to ClashMeta format (internal)
 	clashMetaProducer := NewClashMetaProducer()
@@ -834,6 +837,8 @@ func (p *SingboxProducer) tlsParser(proxy Proxy, parsed map[string]interface{}) 
 //   - 证书与 sha256 pin 同时存在时冲突,报错。
 //
 // 以前 sing-box 只认公钥 pin,指纹一律丢掉 —— 自签节点导出到 sing-box 就没有任何校验手段了。
+// certificate_sha256 是 sing-box 1.15.0 才加的字段,只在 ProduceOptions.SingBoxVersion >= 1.15 时写,
+// 否则(包括版本未知)仍按旧做法丢掉指纹 pin。
 func (p *SingboxProducer) tlsCertificateParser(proxy Proxy, tls map[string]interface{}) error {
 	name := GetString(proxy, "name")
 	if ca := GetString(proxy, "ca"); ca != "" {
@@ -861,7 +866,14 @@ func (p *SingboxProducer) tlsCertificateParser(proxy Proxy, tls map[string]inter
 		tls["certificate_public_key_sha256"] = v
 	}
 	hasCertificate := listLen(tls["certificate"]) > 0 || GetString(tls, "certificate_path") != ""
-	if v, ok := proxy["_certificate_sha256"]; ok && v != nil {
+	if !p.certSHA256 {
+		// 客户端不认 certificate_sha256(1.15.0 之前):照上游 a3e61061 之前的做法丢掉证书指纹 pin 并提示,
+		// 写上去的话 sing-box 报 unknown field,整份配置导入失败(用户实报 SFI/SFA)。
+		if listLen(proxy["_certificate_sha256"]) > 0 ||
+			firstNonEmptyString(GetString(proxy, "fingerprint"), GetString(proxy, "tls-fingerprint")) != "" {
+			logger.Warn("[sing-box] 客户端版本低于 1.15 不认 certificate_sha256,证书指纹 pin 已丢弃", "proxy", name)
+		}
+	} else if v, ok := proxy["_certificate_sha256"]; ok && v != nil {
 		tls["certificate_sha256"] = v
 	} else if fp := firstNonEmptyString(GetString(proxy, "fingerprint"), GetString(proxy, "tls-fingerprint")); fp != "" &&
 		!hasCertificate && listLen(tls["certificate_public_key_sha256"]) == 0 {
@@ -2308,4 +2320,19 @@ func tailscaleHasControlHTTPClient(v interface{}) bool {
 		}
 	}
 	return false
+}
+
+// singboxVersionAtLeast v(如 "1.15.0"、"v1.15.0-alpha.2")的主.次版本是否 >= major.minor;解析不了按否。
+func singboxVersionAtLeast(v string, major, minor int) bool {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	ma, err1 := strconv.Atoi(parts[0])
+	mi, err2 := strconv.Atoi(strings.SplitN(parts[1], "-", 2)[0])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return ma > major || (ma == major && mi >= minor)
 }
