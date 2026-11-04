@@ -1001,17 +1001,24 @@ func parseVlessURL(uri string) (map[string]any, error) {
 		node["headerType"] = headerType
 	}
 
-	// finalmask(fm=):JSON 对象就存对象,解析不了或不是对象就原样存字符串(上游 18dfe4c0)
-	if fm := queryParams["fm"]; fm != "" {
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(fm), &obj); err == nil && obj != nil {
-			node["_finalmask"] = obj
-		} else {
-			node["_finalmask"] = fm
-		}
-	}
+	setFinalmask(node, queryParams["fm"])
 
 	return node, nil
+}
+
+// setFinalmask 存 Xray finalmask(URI 的 fm=):JSON 对象就存对象,解析不了或不是对象就原样存字符串(上游 18dfe4c0)。
+// 存成下划线开头的 _finalmask:Clash/mihomo 不认识 finalmask,clash 系 producer 会丢掉 _ 开头的字段,
+// URI producer 再原样写回 fm=。
+func setFinalmask(node map[string]any, fm string) {
+	if fm == "" {
+		return
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(fm), &obj); err == nil && obj != nil {
+		node["_finalmask"] = obj
+	} else {
+		node["_finalmask"] = fm
+	}
 }
 
 // vlessStyleVmess vmess:// 后面直接是 用户@主机 的写法(而不是 base64 JSON)
@@ -1143,6 +1150,9 @@ func parseHysteriaGeneric(uri string, protocol string) (map[string]any, error) {
 	if pin := certFingerprint(queryParams); pin != "" {
 		node["tls-fingerprint"] = pin
 	}
+	// Xray 的 hysteria2 分享链接可带 fm=(finalmask:UDP 自定义包头 / quicParams 等),不存的话
+	// 导入后少了伪装头,服务端不认,节点连不上(妙妙屋X #1672)。上游 Sub-Store 的 hy2 解析器同样漏了。
+	setFinalmask(node, queryParams["fm"])
 
 	applyTlsSniFallback(node, "sni")
 

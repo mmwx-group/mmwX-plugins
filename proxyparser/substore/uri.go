@@ -1119,6 +1119,10 @@ func (p *URIProducer) encodeHysteria2(proxy Proxy) (string, error) {
 	if GetBool(proxy, "tfo") {
 		ps = append(ps, "fastopen=1")
 	}
+	// _finalmask → fm(Xray finalmask,导入时原样存下的)
+	if fm := uriJSONValue(proxy["_finalmask"]); fm != "" {
+		ps = append(ps, "fm="+uriEncodeComponent(fm))
+	}
 
 	uri := fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s",
 		uriEncodeUserInfo(password), server, port, strings.Join(ps, "&"), uriEncodeComponent(name))
