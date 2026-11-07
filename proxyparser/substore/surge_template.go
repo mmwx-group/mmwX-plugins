@@ -279,55 +279,6 @@ func convertExternalController(controller string) string {
 	return "password@" + controller
 }
 
-// ConvertClashRulesToSurgeFormat converts Clash rules array to Surge rules
-func ConvertClashRulesToSurgeFormat(rules []string, ruleProviders map[string]ClashRuleProvider) ([]string, error) {
-	var surgeRules []string
-
-	for _, rule := range rules {
-		parts := strings.Split(rule, ",")
-		if len(parts) < 2 {
-			continue
-		}
-
-		ruleType := strings.TrimSpace(parts[0])
-
-		switch ruleType {
-		case "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6", "GEOIP", "SRC-IP-CIDR", "SRC-PORT", "DST-PORT", "PROCESS-NAME":
-			// These rules are compatible between Clash and Surge
-			surgeRules = append(surgeRules, rule)
-
-		case "MATCH":
-			// Clash MATCH -> Surge FINAL
-			if len(parts) >= 2 {
-				surgeRules = append(surgeRules, fmt.Sprintf("FINAL,%s", strings.TrimSpace(parts[1])))
-			}
-
-		case "RULE-SET":
-			// Convert RULE-SET reference
-			if len(parts) >= 3 {
-				ruleSetName := strings.TrimSpace(parts[1])
-				policy := strings.TrimSpace(parts[2])
-
-				// Look up rule provider
-				if provider, ok := ruleProviders[ruleSetName]; ok {
-					// Use the URL from rule provider
-					noResolve := ""
-					if len(parts) >= 4 && strings.TrimSpace(parts[3]) == "no-resolve" {
-						noResolve = ",no-resolve"
-					}
-					surgeRules = append(surgeRules, fmt.Sprintf("RULE-SET,%s,%s%s", provider.URL, policy, noResolve))
-				}
-			}
-
-		default:
-			// Other rule types, keep as-is
-			surgeRules = append(surgeRules, rule)
-		}
-	}
-
-	return surgeRules, nil
-}
-
 // ConvertClashProxyGroupsToSurge converts Clash proxy groups to Surge format
 func ConvertClashProxyGroupsToSurge(groups []ClashProxyGroup) []ACLProxyGroup {
 	var aclGroups []ACLProxyGroup

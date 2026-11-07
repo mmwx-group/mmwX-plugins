@@ -149,7 +149,8 @@ func TestBuildCompleteSurgeConfigPrunesDanglingPolicies(t *testing.T) {
 		"DOMAIN-SUFFIX,c.com,PROXY",
 		"DOMAIN,a.com,DIRECT",
 		"IP-CIDR,1.1.1.0/24,DIRECT,no-resolve",
-		"AND,((DOMAIN,x.com),(DST-PORT,443)),DIRECT",
+		// Surge 的端口规则拼作 DEST-PORT(DST-PORT 会让整份配置拒载)
+		"AND,((DOMAIN,x.com),(DEST-PORT,443)),DIRECT",
 		"GEOIP,CN,DIRECT",
 		"FINAL,DIRECT",
 	}
