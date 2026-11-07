@@ -77,7 +77,8 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 				logger.Info("[Stash] 跳过SS v2ray-plugin非websocket模式节点", "name", GetString(proxy, "name"))
 
 			// vless + reality-opts: 仅当存在 network 且 network != tcp 时跳过 (JS 第 66-72 行)
-			case proxyType == "vless" && IsPresent(proxy, "reality-opts") && network != "" && network != "tcp":
+			// xhttp 例外:Stash 的 XHTTP 可以配 REALITY(stash.wiki 的 VLESS XHTTP / XTLS Vision 两节)
+			case proxyType == "vless" && IsPresent(proxy, "reality-opts") && network != "" && network != "tcp" && network != "xhttp":
 				shouldSkip = true
 				logger.Info("[Stash] 跳过VLESS reality节点(network非tcp)", "name", GetString(proxy, "name"), "network", network)
 
@@ -86,10 +87,10 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 				shouldSkip = true
 				logger.Info("[Stash] 跳过anytls节点(network/reality不支持)", "name", GetString(proxy, "name"), "network", network)
 
-			// xhttp 网络不支持 (JS 第 81-82 行)
-			case network == "xhttp":
+			// xhttp 只有 VLESS 支持(Stash iOS/tvOS 3.6+、macOS 4.3+,见 stash.wiki/proxy-protocols/proxy-types)
+			case network == "xhttp" && proxyType != "vless":
 				shouldSkip = true
-				logger.Info("[Stash] 跳过xhttp网络节点", "name", GetString(proxy, "name"))
+				logger.Info("[Stash] 跳过非VLESS的xhttp节点", "name", GetString(proxy, "name"))
 
 			// vless encryption 必须为空或 none (JS 第 83-88 行)
 			case proxyType == "vless" && GetString(proxy, "encryption") != "" && GetString(proxy, "encryption") != "none":
@@ -343,6 +344,14 @@ func (p *StashProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 						delete(h2Opts, "headers")
 					}
 				}
+			}
+		}
+
+		// XHTTP:mihomo 写法换成 Stash 写法(download-settings 里 SNI 叫 sni、证书指纹叫 server-cert-fingerprint;
+		// Stash 没有连接复用 reuse-settings,去掉)
+		if proxyType == "vless" && network == "xhttp" {
+			if opts := GetMap(transformed, "xhttp-opts"); opts != nil {
+				transformed["xhttp-opts"] = stashXHTTPOpts(transformed, opts)
 			}
 		}
 
@@ -969,4 +978,42 @@ func stashNormalizeVmessCipher(cipher string) string {
 	default:
 		return "auto"
 	}
+}
+
+// stashXHTTPOpts 复制一份 xhttp-opts 并换成 Stash 的写法(不改动传入的节点)。
+func stashXHTTPOpts(proxy Proxy, opts map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(opts))
+	for k, v := range opts {
+		out[k] = v
+	}
+	// mihomo 只读 xhttp-opts.mode,老节点只在顶层写了 mode
+	if GetString(out, "mode") == "" {
+		if mode := GetString(proxy, "mode"); mode != "" {
+			out["mode"] = mode
+		}
+	}
+	delete(out, "reuse-settings")
+	if ds := xhttpAnyMap(opts["download-settings"]); ds != nil {
+		nds := make(map[string]interface{}, len(ds))
+		for k, v := range ds {
+			nds[k] = v
+		}
+		delete(nds, "reuse-settings")
+		if v, ok := nds["servername"]; ok {
+			if _, has := nds["sni"]; !has {
+				nds["sni"] = v
+			}
+			delete(nds, "servername")
+		}
+		for _, k := range []string{"fingerprint", "tls-fingerprint"} {
+			if v, ok := nds[k]; ok {
+				if _, has := nds["server-cert-fingerprint"]; !has {
+					nds["server-cert-fingerprint"] = v
+				}
+				delete(nds, k)
+			}
+		}
+		out["download-settings"] = nds
+	}
+	return out
 }

@@ -358,12 +358,9 @@ func (p *ShadowrocketProducer) Produce(proxies []Proxy, outputType string, opts 
 					}
 				}
 
-				if headers := GetMap(xhttpOpts, "headers"); headers != nil {
-					if IsPresent(transformed, "xhttp-opts", "headers", "Host") {
-						if host, ok := headers["Host"].(string); ok {
-							transformed["obfsParam"] = host
-						}
-					}
+				// Host:xhttp-opts.host(mihomo / 妙妙屋X 的写法)优先,其次 headers.Host
+				if host := xhttpHost(xhttpOpts); host != "" {
+					transformed["obfsParam"] = host
 				}
 			}
 		}

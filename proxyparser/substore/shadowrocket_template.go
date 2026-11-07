@@ -1018,10 +1018,9 @@ func (p *ShadowrocketTemplateProducer) transformProxies(proxies []Proxy, opts *P
 					transformed["path"] = path
 				}
 
-				if headers := GetMap(xhttpOpts, "headers"); headers != nil {
-					if host, ok := headers["Host"].(string); ok {
-						transformed["obfsParam"] = host
-					}
+				// Host:xhttp-opts.host(mihomo / 妙妙屋X 的写法)优先,其次 headers.Host
+				if host := xhttpHost(xhttpOpts); host != "" {
+					transformed["obfsParam"] = host
 				}
 			}
 		}
@@ -1045,10 +1044,9 @@ func (p *ShadowrocketTemplateProducer) transformProxies(proxies []Proxy, opts *P
 					transformed["path"] = path
 				}
 
-				if headers := GetMap(xhttpOpts, "headers"); headers != nil {
-					if host, ok := headers["Host"].(string); ok {
-						transformed["obfsParam"] = host
-					}
+				// Host:xhttp-opts.host(mihomo / 妙妙屋X 的写法)优先,其次 headers.Host
+				if host := xhttpHost(xhttpOpts); host != "" {
+					transformed["obfsParam"] = host
 				}
 			}
 		}

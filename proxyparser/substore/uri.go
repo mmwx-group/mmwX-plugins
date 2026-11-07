@@ -667,40 +667,25 @@ func (p *URIProducer) encodeVLESS(proxy Proxy) (string, error) {
 				params.Set("authority", authority)
 			}
 		}
-	case "xhttp":
-		// Frontend line 204-206: splithttp/xhttp mode
-		if mode := GetString(proxy, "mode"); mode != "" {
-			params.Set("mode", mode)
-		} else {
-			params.Set("mode", "auto")
-		}
-		if xhttpOpts := GetMap(proxy, "xhttp-opts"); xhttpOpts != nil {
-			if path := GetString(xhttpOpts, "path"); path != "" {
-				params.Set("path", path)
-			}
-			if headers := GetMap(xhttpOpts, "headers"); headers != nil {
-				if host := GetString(headers, "Host"); host != "" {
-					params.Set("host", host)
-				}
-			}
-		}
-
-	case "splithttp":
+	case "xhttp", "splithttp":
 		params.Set("type", "xhttp")
-		// Frontend line 204-206: splithttp mode
-		if mode := GetString(proxy, "mode"); mode != "" {
+		// mode:mihomo 只读 xhttp-opts.mode,旧写法在节点顶层;都没有写 auto
+		opts := GetMap(proxy, network+"-opts")
+		if mode := xhttpMode(proxy, opts); mode != "" {
 			params.Set("mode", mode)
 		} else {
 			params.Set("mode", "auto")
 		}
-		if splithttpOpts := GetMap(proxy, "splithttp-opts"); splithttpOpts != nil {
-			if path := GetString(splithttpOpts, "path"); path != "" {
+		if opts != nil {
+			if path := GetString(opts, "path"); path != "" {
 				params.Set("path", path)
 			}
-			if headers := GetMap(splithttpOpts, "headers"); headers != nil {
-				if host := GetString(headers, "Host"); host != "" {
-					params.Set("host", host)
-				}
+			if host := xhttpHost(opts); host != "" {
+				params.Set("host", host)
+			}
+			// 进阶选项(填充、请求头、连接复用、上下行分离…)写进 extra,Xray / v2rayN / v2rayNG 认这个
+			if extra := buildXHTTPExtra(proxy, opts); extra != "" {
+				params.Set("extra", extra)
 			}
 		}
 	case "kcp":
@@ -747,7 +732,7 @@ func (p *URIProducer) encodeVLESS(proxy Proxy) (string, error) {
 	// fragment 用 uriEncodeComponent 对齐 JS encodeURIComponent(proxy.name)
 	// (url.PathEscape 不会转义 & = , 等, 与 JS 不一致)。
 	uri := fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-		uuid, server, port, params.Encode(), uriEncodeComponent(name))
+		uuid, server, port, uriEncodeQuery(params), uriEncodeComponent(name))
 	return uri, nil
 }
 
@@ -1690,3 +1675,13 @@ func uriJSONValue(v interface{}) string {
 	return ""
 }
 
+// uriEncodeQuery 同 params.Encode(),但 extra 里的空格写成 %20 而不是 +:extra 是 JSON(请求头的值可能带空格),
+// v2rayN 等导入端按 RFC 3986 解码,不把 + 当空格。
+func uriEncodeQuery(params url.Values) string {
+	q := params.Encode()
+	if extra := params.Get("extra"); strings.Contains(extra, " ") {
+		esc := url.QueryEscape(extra)
+		q = strings.Replace(q, "extra="+esc, "extra="+strings.ReplaceAll(esc, "+", "%20"), 1)
+	}
+	return q
+}

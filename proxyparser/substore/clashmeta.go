@@ -131,8 +131,8 @@ func (p *ClashMetaProducer) Produce(proxies []Proxy, outputType string, opts *Pr
 				}
 			}
 
-			// Skip xhttp network
-			if GetString(proxy, "network") == "xhttp" {
+			// xhttp 只有 VLESS 能用(mihomo 的 xhttp-opts 原样输出;上游 Sub-Store 同样只滤掉非 VLESS)
+			if GetString(proxy, "network") == "xhttp" && proxyType != "vless" {
 				continue
 			}
 		}

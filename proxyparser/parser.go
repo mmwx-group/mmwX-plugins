@@ -973,16 +973,21 @@ func parseVlessURL(uri string) (map[string]any, error) {
 			xhttpOpts["path"] = "/"
 		}
 		if host := queryParams["host"]; host != "" {
+			// mihomo 的 xhttp 只认 xhttp-opts.host(headers 里的 Host 不生效);headers.Host 留给旧的读法
+			xhttpOpts["host"] = safeDecodeURIComponent(host)
 			xhttpOpts["headers"] = map[string]string{"Host": safeDecodeURIComponent(host)}
 		} else {
 			xhttpOpts["headers"] = map[string]string{}
 		}
-		node["xhttp-opts"] = xhttpOpts
 		if mode := queryParams["mode"]; mode != "" {
 			node["mode"] = mode
+			xhttpOpts["mode"] = mode // mihomo 只读 xhttp-opts.mode
 		} else {
 			node["mode"] = "auto"
 		}
+		// Xray 的进阶选项(填充、请求头、连接复用、上下行分离…)
+		applyXHTTPExtra(xhttpOpts, queryParams["extra"])
+		node["xhttp-opts"] = xhttpOpts
 	}
 	applyTlsSniFallback(node, "servername")
 	if _, exists := node["servername"]; !exists {
