@@ -18,6 +18,9 @@ type ProduceOptions struct {
 	// tls.certificate_sha256 只有 sing-box 1.15.0 起才认,更老的版本见到这个字段整份配置都加载失败,
 	// 所以只有确知 >= 1.15 才写。
 	SingBoxVersion string
+	// SurgeVLESS Surge / Surge Mac 输出 VLESS 节点。Surge 从 iOS 6.0 / Mac 6.12 起才认 vless,
+	// 旧版遇到 vless 行会整份配置拒载,而 UA 里只有构建号、分不出版本,所以默认不输出,由调用方按设置打开。
+	SurgeVLESS bool
 }
 
 // Producer is the interface for all proxy format producers

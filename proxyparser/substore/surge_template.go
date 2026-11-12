@@ -58,6 +58,9 @@ type ClashRuleProvider struct {
 
 // SurgeTemplateConfig represents configuration for Surge template conversion
 type SurgeTemplateConfig struct {
+	// SurgeVLESS 输出 VLESS 节点(见 ProduceOptions.SurgeVLESS)。
+	SurgeVLESS bool
+
 	// General settings
 	LogLevel           string
 	BypassSystem       bool
@@ -392,6 +395,7 @@ func BuildCompleteSurgeConfig(
 	surgeProducer := NewSurgeProducer()
 	opts := &ProduceOptions{
 		IncludeUnsupportedProxy: includeUnsupported,
+		SurgeVLESS:              templateOpts != nil && templateOpts.SurgeVLESS,
 	}
 
 	// 记下实际输出了哪些节点:不支持的类型(WireGuard 等)被跳过后,组 / 规则 /

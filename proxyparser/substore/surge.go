@@ -140,6 +140,11 @@ func (p *SurgeProducer) ProduceOne(proxy Proxy, outputType string, opts *Produce
 			return p.wireguard(proxy)
 		}
 		return "", fmt.Errorf("platform Surge does not support proxy type: %s", proxyType)
+	case "vless":
+		if opts == nil || !opts.SurgeVLESS {
+			return "", fmt.Errorf("platform Surge does not support proxy type: %s (needs iOS 6.0 / Mac 6.12, off by default)", proxyType)
+		}
+		return p.vless(proxy)
 	case "anytls":
 		// anytls-tcp 是 Surge 原生支持(5.9+),默认输出;只有 reality / 非 tcp network 才是 Surge 真不支持的。
 		network := GetString(proxy, "network")
@@ -282,6 +287,85 @@ func (p *SurgeProducer) vmess(proxy Proxy, includeUnsupported bool) (string, err
 
 	p.appendTLS(result, proxy)
 	p.appendShadowTLS(result, proxy)
+
+	return result.String(), nil
+}
+
+// vless Surge 的 VLESS(iOS 6.0 / Mac 6.12+,见 https://manual.nssurge.com/policies/vless.html):
+// 传输 RAW / WebSocket / gRPC,安全 无 / TLS / REALITY,flow 只有 xtls-rprx-vision(-udp443),
+// UDP 一律 XUDP 不用写。不支持 XHTTP / HTTPUpgrade / mKCP / VLESS Encryption,这几种跳过。
+func (p *SurgeProducer) vless(proxy Proxy) (string, error) {
+	if enc := strings.TrimSpace(GetString(proxy, "encryption")); enc != "" && enc != "none" {
+		return "", fmt.Errorf("platform Surge does not support VLESS encryption %s", enc)
+	}
+	network := GetString(proxy, "network")
+	switch network {
+	case "", "tcp", "ws", "grpc":
+	default:
+		return "", fmt.Errorf("platform Surge does not support VLESS network %s", network)
+	}
+	reality := GetMap(proxy, "reality-opts")
+	publicKey := ""
+	if reality != nil {
+		publicKey = GetString(reality, "public-key")
+		if publicKey == "" {
+			return "", fmt.Errorf("VLESS REALITY without public-key")
+		}
+	}
+	secure := publicKey != "" || GetBool(proxy, "tls")
+	flow := GetString(proxy, "flow")
+	switch flow {
+	case "":
+	case "xtls-rprx-vision", "xtls-rprx-vision-udp443":
+		if !secure || network == "ws" {
+			return "", fmt.Errorf("platform Surge does not support VLESS flow %s without TLS / REALITY or over WebSocket", flow)
+		}
+	default:
+		return "", fmt.Errorf("platform Surge does not support VLESS flow %s", flow)
+	}
+	if network == "grpc" && !secure {
+		return "", fmt.Errorf("platform Surge does not support VLESS gRPC without TLS / REALITY")
+	}
+
+	result := &Result{Proxy: proxy}
+	result.Append(fmt.Sprintf("%s=vless,%s,%d",
+		GetString(proxy, "name"),
+		GetString(proxy, "server"),
+		GetInt(proxy, "port")))
+	result.AppendIfPresent(`,username=%s`, "uuid")
+	if flow != "" {
+		result.Append(",flow=" + flow)
+	}
+	p.appendIPVersion(result, proxy)
+	p.appendCommonOptions(result, proxy)
+
+	switch network {
+	case "ws":
+		p.handleTransport(result, proxy, false)
+	case "grpc":
+		result.Append(",grpc=true")
+		if opts := GetMap(proxy, "grpc-opts"); opts != nil {
+			if name := GetString(opts, "grpc-service-name"); name != "" {
+				result.Append(",grpc-service-name=" + name)
+			}
+		}
+	}
+
+	if publicKey != "" {
+		// REALITY 隐含 TLS:不写 tls=true;证书校验 / 钉证书对 REALITY 不适用,也不写。
+		result.Append(",reality-public-key=" + publicKey)
+		if sid := GetString(reality, "short-id"); sid != "" {
+			result.Append(",reality-short-id=" + sid)
+		}
+		if sni := GetSNI(proxy); sni != "" {
+			result.Append(",sni=" + sni)
+		}
+		if alpn := GetStringSlice(proxy, "alpn"); len(alpn) > 0 {
+			result.Append(fmt.Sprintf(`,alpn="%s"`, strings.Join(alpn, ",")))
+		}
+	} else if GetBool(proxy, "tls") {
+		p.appendTLS(result, proxy)
+	}
 
 	return result.String(), nil
 }
