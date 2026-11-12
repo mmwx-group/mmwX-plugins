@@ -105,11 +105,17 @@ func TestBuildCompleteSurgeConfigVLESSSwitch(t *testing.T) {
 	if strings.Contains(off, "=vless,") || strings.Contains(off, "jp") {
 		t.Fatalf("关闭时不该出现 VLESS 节点或引用:\n%s", off)
 	}
-	on, err := BuildCompleteSurgeConfig(cfg, []Proxy{vlessRealityProxy()}, &SurgeTemplateConfig{SurgeVLESS: true}, false)
+	withDefaults := DefaultSurgeTemplateConfig()
+	withDefaults.SurgeVLESS = true
+	on, err := BuildCompleteSurgeConfig(cfg, []Proxy{vlessRealityProxy()}, withDefaults, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(on, "jp=vless,1.2.3.4,443") {
 		t.Fatalf("打开时应输出 VLESS:\n%s", on)
+	}
+	// 从默认设置出发,除 VLESS 那几行外 [General] 与传 nil 完全相同。
+	if strings.SplitN(on, "[Proxy]", 2)[0] != strings.SplitN(off, "[Proxy]", 2)[0] {
+		t.Fatalf("DefaultSurgeTemplateConfig 的 [General] 与 nil 不同")
 	}
 }

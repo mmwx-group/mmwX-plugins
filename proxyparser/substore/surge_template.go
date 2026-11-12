@@ -330,6 +330,14 @@ func convertProxyGroupType(clashType string) string {
 }
 
 // applyDefaultSurgeConfig applies default values to Surge config
+// DefaultSurgeTemplateConfig 与 BuildCompleteSurgeConfig 传 nil 时一样的默认设置;
+// 调用方只想改一两项(如 SurgeVLESS)时从它出发,别的输出不变。
+func DefaultSurgeTemplateConfig() *SurgeTemplateConfig {
+	opts := &SurgeTemplateConfig{}
+	applyDefaultSurgeConfig(opts)
+	return opts
+}
+
 func applyDefaultSurgeConfig(opts *SurgeTemplateConfig) {
 	if opts.LogLevel == "" {
 		opts.LogLevel = "notify"
