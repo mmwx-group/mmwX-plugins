@@ -1943,6 +1943,8 @@ func Parse(uri string) (map[string]any, error) {
 		return parseMieruURL(uri)
 	case strings.HasPrefix(uri, "snell://"):
 		return parseSnellURL(uri)
+	case strings.HasPrefix(uri, "ssh://"):
+		return parseSSHURL(uri)
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", uri)
 	}

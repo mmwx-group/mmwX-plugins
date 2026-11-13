@@ -347,6 +347,8 @@ func (p *URIProducer) Produce(proxies []Proxy, outputType string, opts *ProduceO
 			uri, err = p.encodeNaive(proxy)
 		case "mieru":
 			uri, err = p.encodeMieru(proxy)
+		case "ssh":
+			uri, err = p.encodeSSH(proxy)
 		default:
 			// Skip unsupported proxy types instead of returning error
 			continue
@@ -1684,4 +1686,44 @@ func uriEncodeQuery(params url.Values) string {
 		q = strings.Replace(q, "extra="+esc, "extra="+strings.ReplaceAll(esc, "+", "%20"), 1)
 	}
 	return q
+}
+
+// encodeSSH 输出 ssh://用户名:密码@服务器:端口?host-key=<公钥>#名称(proxyparser.parseSSHURL 的逆运算)。
+// SSH 没有各客户端通用的分享链接,这是本项目自己的写法,主要用来在面板之间导出 / 导入节点。
+// host-key 多把就重复这个参数;空格编成 %20、'+' 编成 %2B(不能用表单编码,公钥 base64 里本来就有 '+')。
+// 只支持密码认证:用私钥的节点没法放进链接,跳过。
+func (p *URIProducer) encodeSSH(proxy Proxy) (string, error) {
+	// preprocessProxy 已经给 IPv6 加过方括号,JoinHostPort 会再加一层,先去掉。
+	server := strings.TrimSuffix(strings.TrimPrefix(GetString(proxy, "server"), "["), "]")
+	port := GetInt(proxy, "port")
+	username := GetString(proxy, "username")
+	password := GetString(proxy, "password")
+	if server == "" || port <= 0 || username == "" {
+		return "", fmt.Errorf("missing server/port/username")
+	}
+	if password == "" {
+		return "", fmt.Errorf("ssh node without password cannot be shared as a link")
+	}
+	u := url.URL{
+		Scheme: "ssh",
+		User:   url.UserPassword(username, password),
+		Host:   net.JoinHostPort(server, fmt.Sprintf("%d", port)),
+	}
+	var q []string
+	keys := GetStringSlice(proxy, "host-key")
+	if len(keys) == 0 {
+		if fp := GetString(proxy, "server-fingerprint"); fp != "" {
+			keys = strings.Split(fp, ",")
+		}
+	}
+	for _, k := range keys {
+		if k = strings.TrimSpace(k); k != "" {
+			q = append(q, "host-key="+strings.ReplaceAll(url.QueryEscape(k), "+", "%20"))
+		}
+	}
+	u.RawQuery = strings.Join(q, "&")
+	if name := GetString(proxy, "name"); name != "" {
+		u.Fragment = name
+	}
+	return u.String(), nil
 }

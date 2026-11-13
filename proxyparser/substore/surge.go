@@ -748,7 +748,13 @@ func (p *SurgeProducer) ssh(proxy Proxy) (string, error) {
 	result.AppendIfPresent(`,password="%s"`, "password")
 	result.AppendIfPresent(`,private-key=%s`, "keystore-private-key")
 	result.AppendIfPresent(`,idle-timeout=%s`, "idle-timeout")
-	result.AppendIfPresent(`,server-fingerprint="%s"`, "server-fingerprint")
+	// Sub-Store 的字段名是 server-fingerprint;mihomo / 妙妙屋X 的节点里叫 host-key(公钥列表)。
+	// 两者是同一个东西(known_hosts 去掉主机名那段),Surge 要求多把用逗号连起来写在一对引号里。
+	if fp := GetString(proxy, "server-fingerprint"); fp != "" {
+		result.Append(fmt.Sprintf(`,server-fingerprint="%s"`, fp))
+	} else if keys := GetStringSlice(proxy, "host-key"); len(keys) > 0 {
+		result.Append(fmt.Sprintf(`,server-fingerprint="%s"`, strings.Join(keys, ",")))
+	}
 
 	p.appendIPVersion(result, proxy)
 	p.appendCommonOptions(result, proxy)
