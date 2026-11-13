@@ -948,9 +948,18 @@ func parseVlessURL(uri string) (map[string]any, error) {
 		if serviceName == "" {
 			serviceName = queryParams["path"]
 		}
-		node["grpc-opts"] = map[string]any{
+		grpcOpts := map[string]any{
 			"grpc-service-name": safeDecodeURIComponent(serviceName),
 		}
+		// mode=gun|multi(Xray 的 multiMode)与 authority:Surge / Egern 等要用,
+		// 记成内部字段 _grpc-type / _grpc-authority(与 Sub-Store 同名),clash 系 producer 输出前会删掉
+		if mode := strings.TrimSpace(queryParams["mode"]); mode != "" {
+			grpcOpts["_grpc-type"] = mode
+		}
+		if authority := strings.TrimSpace(safeDecodeURIComponent(queryParams["authority"])); authority != "" {
+			grpcOpts["_grpc-authority"] = authority
+		}
+		node["grpc-opts"] = grpcOpts
 	} else if network == "h2" || network == "http" {
 		h2Opts := map[string]any{
 			"path": safeDecodeURIComponent(queryParams["path"]),

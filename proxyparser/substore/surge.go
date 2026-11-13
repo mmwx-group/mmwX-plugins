@@ -300,7 +300,10 @@ func (p *SurgeProducer) vless(proxy Proxy) (string, error) {
 	}
 	network := GetString(proxy, "network")
 	switch network {
-	case "", "tcp", "ws", "grpc":
+	case "", "tcp", "raw", "none":
+		// raw 是 Xray 新版对 tcp 的叫法,none 是部分分享链接的写法,都按 RAW 处理
+		network = "tcp"
+	case "ws", "grpc":
 	default:
 		return "", fmt.Errorf("platform Surge does not support VLESS network %s", network)
 	}
@@ -313,12 +316,17 @@ func (p *SurgeProducer) vless(proxy Proxy) (string, error) {
 		}
 	}
 	secure := publicKey != "" || GetBool(proxy, "tls")
+	// WebSocket 只能配 无 / TLS,不能配 REALITY(手册的组合表;与 Sub-Store 091e6f8d 一致)
+	if network == "ws" && publicKey != "" {
+		return "", fmt.Errorf("platform Surge does not support VLESS WebSocket with REALITY")
+	}
 	flow := GetString(proxy, "flow")
 	switch flow {
 	case "":
 	case "xtls-rprx-vision", "xtls-rprx-vision-udp443":
-		if !secure || network == "ws" {
-			return "", fmt.Errorf("platform Surge does not support VLESS flow %s without TLS / REALITY or over WebSocket", flow)
+		// Vision 只能配 RAW + TLS / REALITY,WebSocket、gRPC 都不行
+		if !secure || network != "tcp" {
+			return "", fmt.Errorf("platform Surge does not support VLESS flow %s without TLS / REALITY or over %s", flow, network)
 		}
 	default:
 		return "", fmt.Errorf("platform Surge does not support VLESS flow %s", flow)
@@ -347,6 +355,14 @@ func (p *SurgeProducer) vless(proxy Proxy) (string, error) {
 		if opts := GetMap(proxy, "grpc-opts"); opts != nil {
 			if name := GetString(opts, "grpc-service-name"); name != "" {
 				result.Append(",grpc-service-name=" + name)
+			}
+			// 分享链接里的 mode / authority(解析时记在 _grpc-type / _grpc-authority)
+			switch mode := strings.ToLower(strings.TrimSpace(GetAnyString(opts, "_grpc-type"))); mode {
+			case "gun", "multi":
+				result.Append(",grpc-mode=" + mode)
+			}
+			if authority := strings.TrimSpace(GetAnyString(opts, "_grpc-authority")); authority != "" {
+				result.Append(",grpc-authority=" + authority)
 			}
 		}
 	}

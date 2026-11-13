@@ -119,3 +119,37 @@ func TestBuildCompleteSurgeConfigVLESSSwitch(t *testing.T) {
 		t.Fatalf("DefaultSurgeTemplateConfig 的 [General] 与 nil 不同")
 	}
 }
+
+// 与 Sub-Store 091e6f8d 对齐的四项:WS + REALITY、gRPC + Vision 跳过;raw / none 按 RAW;gRPC 的 mode / authority 照写。
+func TestSurgeVLESSUpstreamAlign(t *testing.T) {
+	wsReality := vlessRealityProxy()
+	wsReality["network"] = "ws"
+	delete(wsReality, "flow")
+	if got := produceSurgeVLESS(t, wsReality, true); got != "" {
+		t.Errorf("WS + REALITY 应该跳过: %s", got)
+	}
+
+	grpcVision := vlessRealityProxy()
+	grpcVision["network"] = "grpc"
+	if got := produceSurgeVLESS(t, grpcVision, true); got != "" {
+		t.Errorf("gRPC + Vision 应该跳过: %s", got)
+	}
+
+	raw := vlessRealityProxy()
+	raw["network"] = "raw"
+	if got := produceSurgeVLESS(t, raw, true); !strings.HasPrefix(got, "jp=vless,1.2.3.4,443,username=") || !strings.Contains(got, ",flow=xtls-rprx-vision,") {
+		t.Errorf("raw 应按 RAW 输出: %s", got)
+	}
+
+	grpc := vlessRealityProxy()
+	grpc["network"] = "grpc"
+	delete(grpc, "flow")
+	grpc["grpc-opts"] = map[string]interface{}{"grpc-service-name": "svc", "_grpc-type": "multi", "_grpc-authority": "a.example.com"}
+	if got := produceSurgeVLESS(t, grpc, true); !strings.Contains(got, ",grpc=true,grpc-service-name=svc,grpc-mode=multi,grpc-authority=a.example.com,") {
+		t.Errorf("gRPC mode / authority: %s", got)
+	}
+	grpc["grpc-opts"] = map[string]interface{}{"grpc-service-name": "svc", "_grpc-type": "guna"}
+	if got := produceSurgeVLESS(t, grpc, true); strings.Contains(got, "grpc-mode") {
+		t.Errorf("不认识的 mode 不该写: %s", got)
+	}
+}
