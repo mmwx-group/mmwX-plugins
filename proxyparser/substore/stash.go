@@ -489,8 +489,9 @@ func (p *StashProducer) generateFullConfig(proxies []Proxy, opts *ProduceOptions
 	// Get original config fields if available
 	var proxyGroups, rules interface{}
 	var ruleProviders map[string]interface{}
-	var defaultNameserver, nameserver []interface{}
+	var defaultNameserver, nameserver, proxyServerNameserver []interface{}
 	var nameserverPolicy map[string]interface{}
+	var followRule bool
 
 	if opts != nil && opts.FullConfig != nil {
 		proxyGroups = opts.FullConfig["proxy-groups"]
@@ -509,12 +510,16 @@ func (p *StashProducer) generateFullConfig(proxies []Proxy, opts *ProduceOptions
 			if ns, ok := dns["nameserver"].([]interface{}); ok {
 				nameserver = ns
 			}
-			// Stash doesn't support direct-nameserver / proxy-server-nameserver,
-			// merge their values into nameserver (deduplicated).
-			nameserver = mergeNameservers(nameserver,
-				dns["direct-nameserver"],
-				dns["proxy-server-nameserver"],
-			)
+			// Stash 没有 direct-nameserver,并进 nameserver(去重)。
+			nameserver = mergeNameservers(nameserver, dns["direct-nameserver"])
+			// proxy-server-nameserver Stash 已支持(iOS 3.6 / macOS 4.3),原样下发,不再并进 nameserver:
+			// 并进去后国内 DNS 与 nameserver 并发抢答境外域名,而且开了 follow-rule 时
+			// 代理服务器域名的解析也会跟着规则走代理,产生递归查询(stash.wiki/features/dns-server)。
+			if ns, ok := dns["proxy-server-nameserver"].([]interface{}); ok {
+				proxyServerNameserver = ns
+			}
+			// mihomo 的 respect-rules 在 Stash 里叫 follow-rule;模板里已经写成 follow-rule 的也认。
+			followRule = dns["respect-rules"] == true || dns["follow-rule"] == true
 			if nsp, ok := dns["nameserver-policy"].(map[string]interface{}); ok {
 				nameserverPolicy = p.expandNameserverPolicy(nsp)
 			}
@@ -739,6 +744,21 @@ func (p *StashProducer) generateFullConfig(proxies []Proxy, opts *ProduceOptions
 				sb.WriteString("\n")
 			}
 		}
+	}
+
+	if len(proxyServerNameserver) > 0 {
+		sb.WriteString("  proxy-server-nameserver:\n")
+		for _, ns := range proxyServerNameserver {
+			if nsStr, ok := ns.(string); ok {
+				sb.WriteString("    - ")
+				sb.WriteString(nsStr)
+				sb.WriteString("\n")
+			}
+		}
+	}
+
+	if followRule {
+		sb.WriteString("  follow-rule: true\n")
 	}
 
 	// nameserver-policy (keys sorted for stable output)

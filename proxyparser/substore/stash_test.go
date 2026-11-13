@@ -179,15 +179,58 @@ func TestStashMergeNameservers(t *testing.T) {
 	if !strings.Contains(output, "https://doh.pub/dns-query") {
 		t.Error("missing merged direct-nameserver value")
 	}
-	// proxy-server-nameserver unique value should be merged in
-	if !strings.Contains(output, "tls://1.1.1.1") {
-		t.Error("missing merged proxy-server-nameserver value tls://1.1.1.1")
-	}
 	// duplicate (doh.pub) should appear only once in nameserver section
 	nameserverSection := output[strings.Index(output, "  nameserver:"):]
-	nameserverSection = nameserverSection[:strings.Index(nameserverSection, "\n  skip-cert-verify")]
+	nameserverSection = nameserverSection[:strings.Index(nameserverSection, "\n  proxy-server-nameserver:")]
 	count := strings.Count(nameserverSection, "https://doh.pub/dns-query")
 	if count != 1 {
 		t.Errorf("doh.pub appears %d times in nameserver section, want 1", count)
+	}
+	// proxy-server-nameserver Stash 已支持,原样单独下发,不再并进 nameserver
+	if strings.Contains(nameserverSection, "tls://1.1.1.1") {
+		t.Error("proxy-server-nameserver value tls://1.1.1.1 should not be merged into nameserver")
+	}
+	if !strings.Contains(output, "  proxy-server-nameserver:\n    - https://doh.pub/dns-query\n    - tls://1.1.1.1\n") {
+		t.Errorf("missing proxy-server-nameserver section:\n%s", output)
+	}
+}
+
+// mihomo 的 respect-rules 在 Stash 里叫 follow-rule(stash.wiki/features/dns-server),转换时改名;
+// 模板里本来就写成 follow-rule 的也保留。两个都没有 / 为 false 时不写。
+func TestStashFollowRule(t *testing.T) {
+	p := NewStashProducer()
+	proxies := []Proxy{
+		{"name": "test", "type": "ss", "server": "1.2.3.4", "port": 443, "cipher": "aes-256-gcm", "password": "pass"},
+	}
+	tests := []struct {
+		name string
+		dns  map[string]interface{}
+		want bool
+	}{
+		{"respect-rules true", map[string]interface{}{"respect-rules": true}, true},
+		{"follow-rule true", map[string]interface{}{"follow-rule": true}, true},
+		{"respect-rules false", map[string]interface{}{"respect-rules": false}, false},
+		{"absent", map[string]interface{}{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.dns["nameserver"] = []interface{}{"https://1.1.1.1/dns-query"}
+			opts := &ProduceOptions{FullConfig: map[string]interface{}{
+				"proxy-groups": []interface{}{},
+				"rules":        []interface{}{},
+				"dns":          tt.dns,
+			}}
+			result, err := p.Produce(proxies, "full", opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			output := result.(string)
+			if got := strings.Contains(output, "  follow-rule: true\n"); got != tt.want {
+				t.Errorf("follow-rule written = %v, want %v\n%s", got, tt.want, output)
+			}
+			if strings.Contains(output, "respect-rules") {
+				t.Errorf("respect-rules should not be written for Stash\n%s", output)
+			}
+		})
 	}
 }
