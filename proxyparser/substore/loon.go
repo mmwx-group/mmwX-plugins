@@ -100,6 +100,8 @@ func (p *LoonProducer) produceOne(proxy Proxy, outputType string, opts *ProduceO
 		return p.shadowsocks(proxy)
 	case "ssr":
 		return p.shadowsocksr(proxy)
+	case "snell":
+		return p.snell(proxy)
 	case "trojan":
 		return p.trojan(proxy)
 	case "vmess":
@@ -258,13 +260,20 @@ func (p *LoonProducer) trojan(proxy Proxy) (string, error) {
 		delete(proxy, "network")
 	}
 
+	isXhttp := network == "xhttp"
+
 	// transport
 	if IsPresent(proxy, "network") {
-		if proxy["network"] == "ws" {
+		switch proxy["network"] {
+		case "ws":
 			result.Append(",transport=ws")
 			result.AppendIfPresent(",path=%s", "ws-opts.path")
 			result.AppendIfPresent(",host=%s", "ws-opts.headers.Host")
-		} else {
+		case "xhttp":
+			if err := appendLoonXhttp(result, proxy); err != nil {
+				return "", err
+			}
+		default:
 			return "", fmt.Errorf("network %s is unsupported", GetString(proxy, "network"))
 		}
 	}
@@ -273,8 +282,13 @@ func (p *LoonProducer) trojan(proxy Proxy) (string, error) {
 	result.AppendIfPresent(",skip-cert-verify=%v", "skip-cert-verify")
 
 	// SNI - compatible with both SubStore's "sni" and miaomiaowu's "servername"
+	// XHTTP 下 Loon 用 sni= 而不是 tls-name=(上游 92ea17c8)
 	if sni := GetSNI(proxy); sni != "" {
-		result.Append(fmt.Sprintf(",tls-name=%s", sni))
+		if isXhttp {
+			result.Append(fmt.Sprintf(",sni=%s", sni))
+		} else {
+			result.Append(fmt.Sprintf(",tls-name=%s", sni))
+		}
 	}
 	result.AppendIfPresent(",tls-cert-sha256=%s", "tls-fingerprint")
 	result.AppendIfPresent(",tls-pubkey-sha256=%s", "tls-pubkey-sha256")
@@ -302,6 +316,7 @@ func (p *LoonProducer) trojan(proxy Proxy) (string, error) {
 
 func (p *LoonProducer) vmess(proxy Proxy, _ bool) (string, error) {
 	isReality := IsPresent(proxy, "reality-opts")
+	isXhttp := GetString(proxy, "network") == "xhttp"
 
 	result := NewResult(proxy)
 	result.Append(fmt.Sprintf("%s=vmess,%s,%d,%s,\"%s\"",
@@ -352,6 +367,10 @@ func (p *LoonProducer) vmess(proxy Proxy, _ bool) (string, error) {
 					result.Append(fmt.Sprintf(",host=%s", httpHost))
 				}
 			}
+		case "xhttp":
+			if err := appendLoonXhttp(result, proxy); err != nil {
+				return "", err
+			}
 		default:
 			return "", fmt.Errorf("network %s is unsupported", GetString(proxy, "network"))
 		}
@@ -374,23 +393,31 @@ func (p *LoonProducer) vmess(proxy Proxy, _ bool) (string, error) {
 		result.AppendIfPresent(",short-id=%s", "reality-opts.short-id")
 	} else {
 		// SNI - compatible with both SubStore's "sni" and miaomiaowu's "servername"
+		// XHTTP 下 Loon 用 sni= 而不是 tls-name=(上游 92ea17c8)
 		if sni := GetSNI(proxy); sni != "" {
-			result.Append(fmt.Sprintf(",tls-name=%s", sni))
+			if isXhttp {
+				result.Append(fmt.Sprintf(",sni=%s", sni))
+			} else {
+				result.Append(fmt.Sprintf(",tls-name=%s", sni))
+			}
 		}
 		result.AppendIfPresent(",tls-cert-sha256=%s", "tls-fingerprint")
 		result.AppendIfPresent(",tls-pubkey-sha256=%s", "tls-pubkey-sha256")
 	}
 
-	// AEAD
+	// AEAD;Loon 的 VMess XHTTP 只支持 AEAD(alterId 0)
+	alterID := GetInt(proxy, "alterId")
 	if IsPresent(proxy, "aead") {
 		if GetBool(proxy, "aead") {
-			result.Append(",alterId=0")
+			alterID = 0
 		} else {
-			result.Append(",alterId=1")
+			alterID = 1
 		}
-	} else {
-		result.Append(fmt.Sprintf(",alterId=%d", GetInt(proxy, "alterId")))
 	}
+	if isXhttp && alterID != 0 {
+		return "", fmt.Errorf("VMess XHTTP requires AEAD")
+	}
+	result.Append(fmt.Sprintf(",alterId=%d", alterID))
 
 	// tfo
 	result.AppendIfPresent(",fast-open=%v", "tfo")
@@ -403,9 +430,11 @@ func (p *LoonProducer) vmess(proxy Proxy, _ bool) (string, error) {
 		result.Append(",udp=true")
 	}
 
-	// tls-profile / alpn:只在 TLS / REALITY 时输出(上游一致)
+	// tls-profile 只在 TLS / REALITY 时输出;alpn 另外在 XHTTP 时也输出(上游 92ea17c8)
 	if GetBool(proxy, "tls") || IsPresent(proxy, "reality-opts") {
 		appendLoonTLSProfile(result, proxy)
+	}
+	if GetBool(proxy, "tls") || IsPresent(proxy, "reality-opts") || isXhttp {
 		appendLoonAlpn(result, proxy)
 	}
 
@@ -424,8 +453,12 @@ func (p *LoonProducer) vless(proxy Proxy, _ bool) (string, error) {
 
 	isXtls := false
 	isReality := IsPresent(proxy, "reality-opts")
+	isXhttp := GetString(proxy, "network") == "xhttp"
 
-	if IsPresent(proxy, "flow") {
+	if isXhttp && GetString(proxy, "flow") != "" {
+		return "", fmt.Errorf("VLESS XHTTP does not support flow")
+	}
+	if !isXhttp && IsPresent(proxy, "flow") {
 		flow := GetString(proxy, "flow")
 		if flow == "xtls-rprx-vision" {
 			isXtls = true
@@ -482,6 +515,10 @@ func (p *LoonProducer) vless(proxy Proxy, _ bool) (string, error) {
 					result.Append(fmt.Sprintf(",host=%s", httpHost))
 				}
 			}
+		case "xhttp":
+			if err := appendLoonXhttp(result, proxy); err != nil {
+				return "", err
+			}
 		default:
 			return "", fmt.Errorf("network %s is unsupported", GetString(proxy, "network"))
 		}
@@ -508,8 +545,13 @@ func (p *LoonProducer) vless(proxy Proxy, _ bool) (string, error) {
 		result.AppendIfPresent(",short-id=%s", "reality-opts.short-id")
 	} else {
 		// SNI - compatible with both SubStore's "sni" and miaomiaowu's "servername"
+		// XHTTP 下 Loon 用 sni= 而不是 tls-name=(上游 92ea17c8)
 		if sni := GetSNI(proxy); sni != "" {
-			result.Append(fmt.Sprintf(",tls-name=%s", sni))
+			if isXhttp {
+				result.Append(fmt.Sprintf(",sni=%s", sni))
+			} else {
+				result.Append(fmt.Sprintf(",tls-name=%s", sni))
+			}
 		}
 		result.AppendIfPresent(",tls-cert-sha256=%s", "tls-fingerprint")
 		result.AppendIfPresent(",tls-pubkey-sha256=%s", "tls-pubkey-sha256")
@@ -526,9 +568,11 @@ func (p *LoonProducer) vless(proxy Proxy, _ bool) (string, error) {
 		result.Append(",udp=true")
 	}
 
-	// tls-profile / alpn:只在 TLS / REALITY 时输出(上游一致)
+	// tls-profile 只在 TLS / REALITY 时输出;alpn 另外在 XHTTP 时也输出(上游 92ea17c8)
 	if GetBool(proxy, "tls") || IsPresent(proxy, "reality-opts") {
 		appendLoonTLSProfile(result, proxy)
+	}
+	if GetBool(proxy, "tls") || IsPresent(proxy, "reality-opts") || isXhttp {
 		appendLoonAlpn(result, proxy)
 	}
 
