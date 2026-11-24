@@ -1330,6 +1330,11 @@ func parseAnytlsURL(uri string) (map[string]any, error) {
 	scv, _ := skipCertVerify(queryParams)
 	node["skip-cert-verify"] = scv
 
+	// pcs / 其它证书指纹别名 → tls-fingerprint,与 encodeAnyTLS 往返一致。
+	if pin := certFingerprint(queryParams); pin != "" {
+		node["tls-fingerprint"] = pin
+	}
+
 	// Client fingerprint
 	if fp := queryParams["fp"]; fp != "" {
 		node["client-fingerprint"] = fp

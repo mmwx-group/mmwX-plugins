@@ -147,6 +147,7 @@ func TestParse_CertificateFingerprintAliases(t *testing.T) {
 		{"vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls&pcs=ABCDEF#vless", "ABCDEF"},
 		{"trojan://password@example.com:443?pinnedPeerCertSha256=123456#trojan", "123456"},
 		{"hysteria2://password@example.com:443?pinSHA256=FEDCBA#hy2", "FEDCBA"},
+		{"anytls://password@example.com:443?sni=example.com&pcs=0a1b2c#anytls", "0a1b2c"},
 	}
 	for _, test := range tests {
 		got, err := Parse(test.uri)

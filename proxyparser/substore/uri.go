@@ -1464,6 +1464,12 @@ func (p *URIProducer) encodeAnyTLS(proxy Proxy) (string, error) {
 		params.Set("fp", fp)
 	}
 
+	// tls-fingerprint → pcs:与 vless / trojan / miu 同款。缺了它自签证书的 anytls 节点
+	// 复制出来的链接没有证书指纹,客户端只能按系统 CA 校验而连不上(许可证站 #1920)。
+	if pcs := GetString(proxy, "tls-fingerprint"); pcs != "" {
+		params.Set("pcs", pcs)
+	}
+
 	// REALITY: Sub-Store 的 anytls 分支是复用 vless 生成器再把 scheme 换回来,
 	// 借此带出 security/pbk/sid。这里不改既有 URI 形态, 只补齐这三个参数, 保证
 	// AnyTLS+REALITY 节点经 uri/v2ray 订阅导出后仍能被 parseAnytlsURL 还原,
