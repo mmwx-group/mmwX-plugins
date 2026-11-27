@@ -116,6 +116,8 @@ func (p *LoonProducer) produceOne(proxy Proxy, outputType string, opts *ProduceO
 		return p.wireguard(proxy)
 	case "hysteria2":
 		return p.hysteria2(proxy)
+	case "mieru":
+		return p.mieru(proxy)
 	case "anytls":
 		if network := GetString(proxy, "network"); network != "" && network != "tcp" {
 			return "", fmt.Errorf("platform Loon does not support proxy type anytls with network %s", network)
